@@ -1,4 +1,4 @@
-# kb-auth Docker ignore
+# auth-center Docker ignore
 src/
 *.java
 *.xml

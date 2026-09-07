@@ -1,6 +1,6 @@
 # language: zh-CN
 # SOP V1.1 阶段2.5 强制要求：BDD 场景文件
-# 模块：kb-auth 认证业务
+# 模块：auth-center 认证业务
 # 覆盖业务流程：FLOW-01 登录认证闭环
 功能: 用户认证
   作为一个用户
