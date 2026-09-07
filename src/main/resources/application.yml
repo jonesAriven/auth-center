@@ -21,7 +21,8 @@ spring:
   # M7: 邮件发送（邮箱验证码 / 忘记密码）。凭证一律走环境变量，禁止硬编码
   mail:
     host: ${MAIL_HOST:}
-    port: ${MAIL_PORT:465}
+    # 163 邮箱走 25 端口（明文/STARTTLS）；465 才需要 SSL，故全部改为 env 可配
+    port: ${MAIL_PORT:25}
     username: ${MAIL_USERNAME:}
     password: ${MAIL_PASSWORD:}
     protocol: smtp
@@ -30,12 +31,13 @@ spring:
         smtp:
           auth: true
           ssl:
-            enable: true
+            enable: ${MAIL_SSL_ENABLE:false}
           starttls:
-            enable: false
+            enable: ${MAIL_STARTTLS:false}
             required: false
     default-encoding: UTF-8
-    from: ${MAIL_FROM:no-reply@marschat.online}
+    # 163 要求发件人与认证账号一致，否则 553
+    from: ${MAIL_FROM:${MAIL_USERNAME:no-reply@marschat.online}}
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
