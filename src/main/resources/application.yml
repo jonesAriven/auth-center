@@ -1,0 +1,97 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: auth-center
+  profiles:
+    active: dev
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: Asia/Shanghai
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_HOST:platform-nacos}:${NACOS_PORT:8848}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:DEFAULT_GROUP}
+        username: ${NACOS_USERNAME:nacos}
+        password: ${NACOS_PASSWORD:nacos123}
+
+  # M7: 邮件发送（邮箱验证码 / 忘记密码）。凭证一律走环境变量，禁止硬编码
+  mail:
+    host: ${MAIL_HOST:}
+    port: ${MAIL_PORT:465}
+    username: ${MAIL_USERNAME:}
+    password: ${MAIL_PASSWORD:}
+    protocol: smtp
+    properties:
+      mail:
+        smtp:
+          auth: true
+          ssl:
+            enable: true
+          starttls:
+            enable: false
+            required: false
+    default-encoding: UTF-8
+    from: ${MAIL_FROM:no-reply@marschat.online}
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# JWT 配置（legacy 直登接口用，RS256 过渡期保留）
+jwt:
+  secret: YourSuperSecretKeyForJwtTokenGenerationMustBe256BitsLong!!
+  access-token-expiration: 900000      # 15 分钟
+  refresh-token-expiration: 604800000  # 7 天
+
+# 统一认证中心（auth-center Phase 1）：OIDC issuer 必须与客户端实际访问地址一致
+marschat:
+  auth:
+    issuer: ${AUTH_ISSUER:http://auth-center:8085}
+
+# AES-256-GCM 加密密钥（32字节 Base64），用于 API Token 加密存储
+crypto:
+  aes-key: "YWVzLTI1Ni1nY20ta2V5LTMyLWJ5dGVzISE="
+
+# API Token 配置
+api-token:
+  prefix: "kb_"
+  expire-days: 365
+
+logging:
+  level:
+    com.marschat.authcenter: debug
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+# M6: springdoc-openapi 配置
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: alpha
+  show-actuator: false
+
+# 请求日志配置
+kb:
+  web-log:
+    event-enabled: true

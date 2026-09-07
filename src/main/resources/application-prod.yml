@@ -1,0 +1,44 @@
+server:
+  port: 8085
+
+spring:
+  datasource:
+    # MySQL GR 集群多主 failover（3节点随机负载均衡 + 自动故障转移）
+    url: jdbc:mysql://192.168.31.105:3306,192.168.31.182:3307,192.168.31.182:3308/${MYSQL_DATABASE:kb_auth}?loadBalanceStrategy=random&loadBalanceHostRemoval=true&failOverReadOnly=false&retriesAllDown=3&connectTimeout=5000&socketTimeout=30000&autoReconnect=true&useUnicode=true&characterEncoding=UTF-8&connectionCollation=utf8mb4_unicode_ci&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:kb123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      keepalive-time: 60000
+      connection-timeout: 10000
+      connection-test-query: SELECT 1
+      validation-timeout: 5000
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      database: 0
+      timeout: 5000ms
+
+jwt:
+  secret: ${JWT_SECRET:YourSuperSecretKeyForJwtTokenGenerationMustBeAtLeast256BitsLong!!}
+  access-token-expiration: 3600000
+  refresh-token-expiration: 604800000
+
+crypto:
+  aes-key: ${CRYPTO_AES_KEY:YWVzLTI1Ni1nY20ta2V5LTMyLWJ5dGVzISE=}
+
+logging:
+  level:
+    com.kb: INFO
+    org.springframework: WARN
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
