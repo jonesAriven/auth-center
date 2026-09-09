@@ -70,6 +70,28 @@ api-token:
   prefix: "kb_"
   expire-days: 365
 
+# SSO Cookie 配置（跨域单点登录）
+# 登录成功后，通过 Set-Cookie 响应头设置 Domain 级别 Cookie
+# 使所有 .marschat.online 子域共享登录状态
+sso:
+  cookie:
+    # Access Token Cookie 名称（必须与前端 auth-components 一致）
+    access-token-name: sso_access_token
+    # Refresh Token Cookie 名称
+    refresh-token-name: sso_refresh_token
+    # Cookie 域名 - 覆盖所有子域
+    domain: .marschat.online
+    # Cookie 路径
+    path: /
+    # 是否仅 HTTPS（生产环境必须为 true，开发环境可设为 false）
+    secure: true
+    # SameSite 策略（Lax 允许顶级导航携带 Cookie）
+    same-site: Lax
+    # Access Token 过期时间（秒），默认 2 小时
+    max-age: 7200
+    # Refresh Token 过期时间（秒），默认 7 天
+    refresh-token-max-age: 604800
+
 logging:
   level:
     com.marschat.authcenter: debug

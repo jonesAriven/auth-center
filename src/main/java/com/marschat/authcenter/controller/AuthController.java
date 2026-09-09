@@ -9,7 +9,9 @@ import com.marschat.authcenter.entity.User;
 import com.marschat.authcenter.service.AuthService;
 import com.marschat.authcenter.service.UserService;
 import com.marschat.authcenter.util.SecurityUtils;
+import com.marschat.authcenter.util.SsoCookieUtil;
 import com.marschat.common.result.Result;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -21,23 +23,50 @@ public class AuthController {
 
     private final AuthService authService;
     private final UserService userService;
+    private final SsoCookieUtil ssoCookieUtil;
 
     @PostMapping("/login")
-    public Result<LoginResponse> login(@Valid @RequestBody LoginRequest request) {
-        return Result.ok(authService.login(request));
+    public Result<LoginResponse> login(@Valid @RequestBody LoginRequest request, HttpServletResponse response) {
+        LoginResponse loginResponse = authService.login(request);
+        
+        // ★ SSO：设置跨域 Cookie，使所有子域共享登录状态
+        if (loginResponse.getAccessToken() != null) {
+            ssoCookieUtil.setAccessTokenCookie(response, loginResponse.getAccessToken());
+            if (loginResponse.getRefreshToken() != null) {
+                ssoCookieUtil.setRefreshTokenCookie(response, loginResponse.getRefreshToken());
+            }
+        }
+        
+        return Result.ok(loginResponse);
     }
 
     @PostMapping("/logout")
-    public Result<Void> logout(@RequestHeader(value = "Authorization", required = false) String authHeader) {
+    public Result<Void> logout(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            HttpServletResponse response) {
         String token = authHeader != null && authHeader.startsWith("Bearer ")
                 ? authHeader.substring(7) : null;
         authService.logout(token);
+        
+        // ★ SSO：清除跨域 Cookie
+        ssoCookieUtil.clearSsoCookies(response);
+        
         return Result.ok();
     }
 
     @PostMapping("/refresh")
-    public Result<LoginResponse> refresh(@Valid @RequestBody RefreshRequest request) {
-        return Result.ok(authService.refresh(request));
+    public Result<LoginResponse> refresh(@Valid @RequestBody RefreshRequest request, HttpServletResponse response) {
+        LoginResponse refreshResponse = authService.refresh(request);
+        
+        // ★ SSO：刷新 Token 后更新 Cookie
+        if (refreshResponse.getAccessToken() != null) {
+            ssoCookieUtil.setAccessTokenCookie(response, refreshResponse.getAccessToken());
+            if (refreshResponse.getRefreshToken() != null) {
+                ssoCookieUtil.setRefreshTokenCookie(response, refreshResponse.getRefreshToken());
+            }
+        }
+        
+        return Result.ok(refreshResponse);
     }
 
     /**
