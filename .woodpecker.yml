@@ -34,7 +34,10 @@ steps:
       - mkdir -p /mnt/shared/woodScript/publish/auth-center
       - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/woodScript/publish/auth-center/
       - echo "=== [4/4] 打包发布 ==="
-      - tar -czf /mnt/shared/woodScript/publish/auth-center-latest.tar.gz -C /mnt/shared/woodScript/publish/auth-center .
+      # 注意：直接对 /mnt/shared（bind mount）里的目录打 tar 会报 "file changed as we read it"
+      # （挂载文件系统 stat 抖动），先在容器本地 /tmp 打包再搬过去
+      - tar -czf /tmp/auth-center-latest.tar.gz -C /mnt/shared/woodScript/publish/auth-center .
+      - mv /tmp/auth-center-latest.tar.gz /mnt/shared/woodScript/publish/auth-center-latest.tar.gz
       - ls -lh /mnt/shared/woodScript/publish/auth-center-latest.tar.gz
       - echo "OK auth-center build done"
 
