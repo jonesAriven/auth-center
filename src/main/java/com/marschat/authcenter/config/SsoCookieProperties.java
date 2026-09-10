@@ -39,9 +39,11 @@ public class SsoCookieProperties {
 
     /**
      * Cookie 域名
-     * 设置为 .marschat.online 可覆盖所有子域
+     * 设置为 marschat.online 即可覆盖所有子域。
+     * 注意：不可带前导点。Tomcat 10 的 Rfc6265CookieProcessor 按 RFC 6265 校验，
+     * 前导点会被判为非法域名并抛异常（导致登录 500）。
      */
-    private String domain = ".marschat.online";
+    private String domain = "marschat.online";
 
     /**
      * Cookie 路径

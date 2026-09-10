@@ -76,7 +76,29 @@ public class SsoCookieUtil {
     }
 
     /**
+     * 归一化 Cookie Domain。
+     * <p>
+     * RFC 6265 规定 Domain 属性不含前导点，Tomcat 10 的 Rfc6265CookieProcessor
+     * 会对带前导点的域名抛 IllegalArgumentException。历史配置里写过
+     * {@code .marschat.online}，这里统一去掉前导点做兜底，避免登录接口 500。
+     */
+    private String normalizedDomain() {
+        String domain = properties.getDomain();
+        if (domain == null) {
+            return null;
+        }
+        String trimmed = domain.trim();
+        while (trimmed.startsWith(".")) {
+            trimmed = trimmed.substring(1);
+        }
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    /**
      * 设置 Cookie
+     * <p>
+     * 注意：任何 Cookie 写入异常都不应中断主流程（登录/刷新/登出），
+     * 否则一个 Cookie 配置问题会把整个认证接口打成 500。
      *
      * @param response HTTP 响应
      * @param name     Cookie 名称
@@ -84,14 +106,22 @@ public class SsoCookieUtil {
      * @param maxAge   过期时间（秒）
      */
     private void setCookie(HttpServletResponse response, String name, String value, int maxAge) {
-        Cookie cookie = new Cookie(name, value);
-        cookie.setDomain(properties.getDomain());
-        cookie.setPath(properties.getPath());
-        cookie.setHttpOnly(true);  // 防 XSS：JavaScript 无法读取
-        cookie.setSecure(properties.isSecure());  // 仅 HTTPS
-        cookie.setAttribute("SameSite", properties.getSameSite());  // 防 CSRF
-        cookie.setMaxAge(maxAge);
-        response.addCookie(cookie);
+        try {
+            Cookie cookie = new Cookie(name, value);
+            String domain = normalizedDomain();
+            if (domain != null) {
+                cookie.setDomain(domain);
+            }
+            cookie.setPath(properties.getPath());
+            cookie.setHttpOnly(true);  // 防 XSS：JavaScript 无法读取
+            cookie.setSecure(properties.isSecure());  // 仅 HTTPS
+            cookie.setAttribute("SameSite", properties.getSameSite());  // 防 CSRF
+            cookie.setMaxAge(maxAge);
+            response.addCookie(cookie);
+        } catch (Exception e) {
+            log.warn("设置 SSO Cookie 失败（不影响登录结果）: name={}, domain={}, err={}",
+                    name, properties.getDomain(), e.getMessage());
+        }
     }
 
     /**
@@ -101,12 +131,19 @@ public class SsoCookieUtil {
      * @param name     Cookie 名称
      */
     private void deleteCookie(HttpServletResponse response, String name) {
-        Cookie cookie = new Cookie(name, "");
-        cookie.setDomain(properties.getDomain());
-        cookie.setPath(properties.getPath());
-        cookie.setMaxAge(0);  // 立即过期
-        cookie.setHttpOnly(true);
-        cookie.setSecure(properties.isSecure());
-        response.addCookie(cookie);
+        try {
+            Cookie cookie = new Cookie(name, "");
+            String domain = normalizedDomain();
+            if (domain != null) {
+                cookie.setDomain(domain);
+            }
+            cookie.setPath(properties.getPath());
+            cookie.setMaxAge(0);  // 立即过期
+            cookie.setHttpOnly(true);
+            cookie.setSecure(properties.isSecure());
+            response.addCookie(cookie);
+        } catch (Exception e) {
+            log.warn("清除 SSO Cookie 失败（不影响登出结果）: name={}, err={}", name, e.getMessage());
+        }
     }
 }
