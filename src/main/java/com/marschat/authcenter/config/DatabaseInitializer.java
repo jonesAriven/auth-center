@@ -91,10 +91,12 @@ public class DatabaseInitializer implements CommandLineRunner {
         createTableIfNotExists("user", """
             CREATE TABLE IF NOT EXISTS user (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(50) NOT NULL COMMENT '用户名',
+                username VARCHAR(64) NOT NULL COMMENT '用户名',
                 password VARCHAR(255) NOT NULL COMMENT '密码',
                 nickname VARCHAR(100) COMMENT '昵称',
-                email VARCHAR(100) COMMENT '邮箱',
+                email VARCHAR(128) COMMENT '邮箱',
+                phone VARCHAR(20) COMMENT '手机号',
+                wechat_openid VARCHAR(64) COMMENT '微信openid',
                 avatar VARCHAR(500) COMMENT '头像',
                 status INT DEFAULT 1 COMMENT '状态 1-启用 0-禁用',
                 realm_id VARCHAR(50) DEFAULT 'kb' COMMENT '账号所属realm(账号池)',
@@ -108,13 +110,51 @@ public class DatabaseInitializer implements CommandLineRunner {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户表'
             """);
 
-        // 存量库补列（幂等：已存在则报错吞掉）
+        // 新增表：用户身份表（邮箱/手机/微信唯一性下沉到 DB 层，UNIQUE(provider,identifier) 为唯一事实）
+        createTableIfNotExists("user_identity", """
+            CREATE TABLE IF NOT EXISTS user_identity (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL COMMENT '用户ID',
+                provider VARCHAR(32) NOT NULL COMMENT '身份提供方 email/phone/wechat',
+                identifier VARCHAR(128) NOT NULL COMMENT '唯一标识(与email(128)对齐避免索引截断)',
+                verified TINYINT DEFAULT 0 COMMENT '是否已验证 0-否 1-是',
+                is_primary TINYINT DEFAULT 0 COMMENT '是否主身份 0-否 1-是',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_provider_identifier (provider, identifier),
+                INDEX idx_user_id (user_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户身份表'
+            """);
+
+        // 新增表：用户凭证表（password 暂不迁移，本表仅建结构，user.password 继续生效）
+        createTableIfNotExists("user_credential", """
+            CREATE TABLE IF NOT EXISTS user_credential (
+                user_id BIGINT NOT NULL COMMENT '用户ID',
+                type VARCHAR(32) NOT NULL COMMENT '凭证类型 password/oauth',
+                secret VARCHAR(255) COMMENT '凭证密钥(加密存储)',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_user_type (user_id, type)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户凭证表'
+            """);
+
+        // 存量库补列（幂等：information_schema 探明后执行，已存在则跳过）
         addColumnIfNotExists("user", "realm_id",
                 "ALTER TABLE user ADD COLUMN realm_id VARCHAR(50) DEFAULT 'kb' COMMENT '账号所属realm(账号池)'");
         addColumnIfNotExists("user", "role",
                 "ALTER TABLE user ADD COLUMN role VARCHAR(20) DEFAULT 'user' COMMENT '角色 admin/user'");
+        addColumnIfNotExists("user", "phone",
+                "ALTER TABLE user ADD COLUMN phone VARCHAR(20) COMMENT '手机号'");
+        addColumnIfNotExists("user", "wechat_openid",
+                "ALTER TABLE user ADD COLUMN wechat_openid VARCHAR(64) COMMENT '微信openid'");
+        // 列长对齐线上（存量库已为 64/128 时会被 information_schema 探明后跳过，仅修正老环境旧建表）
+        alterColumnTypeIfNeeded("user", "username", "varchar(64)",
+                "ALTER TABLE user MODIFY COLUMN username VARCHAR(64) NOT NULL COMMENT '用户名'");
+        alterColumnTypeIfNeeded("user", "email", "varchar(128)",
+                "ALTER TABLE user MODIFY COLUMN email VARCHAR(128) COMMENT '邮箱'");
         addColumnIfNotExists("oauth2_registered_client", "client_secret_expires_at",
                 "ALTER TABLE oauth2_registered_client ADD COLUMN client_secret_expires_at TIMESTAMP DEFAULT NULL");
+
+        // 存量数据迁移：user.email/phone/wechat_openid -> user_identity（幂等，可重复执行）
+        migrateUserIdentities();
 
         // Spring Authorization Server JDBC 表（官方 schema）
         createTableIfNotExists("oauth2_registered_client", """
@@ -270,6 +310,66 @@ public class DatabaseInitializer implements CommandLineRunner {
             }
         } catch (Exception e) {
             log.warn("表 {} 补列 {} 失败: {}", tableName, columnName, e.getMessage());
+        }
+    }
+
+    /** 列长对齐：仅当 information_schema 中实际类型与预期不符时才 ALTER（幂等，存量已对齐库自动跳过） */
+    private void alterColumnTypeIfNeeded(String tableName, String columnName, String expectedType, String alterSql) {
+        try {
+            String actual = jdbcTemplate.queryForObject(
+                "SELECT COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() " +
+                "AND TABLE_NAME = ? AND COLUMN_NAME = ?", String.class, tableName, columnName);
+            if (actual != null && !actual.equalsIgnoreCase(expectedType)) {
+                jdbcTemplate.execute(alterSql);
+                log.info("表 {} 列 {} 类型由 {} 调整为 {}", tableName, columnName, actual, expectedType);
+            }
+        } catch (Exception e) {
+            log.warn("表 {} 列 {} 类型调整失败: {}", tableName, columnName, e.getMessage());
+        }
+    }
+
+    /**
+     * 存量迁移：把 user 表的 email/phone/wechat_openid 写入 user_identity。
+     * 幂等保证：① application 每次启动都会跑 run()，故逐行先查 user_identity 是否已存在 (provider,identifier)；
+     *          ② UNIQUE(provider,identifier) 兜底，即使并发也不会产生重复行；③ 跳过 NULL 与空串。
+     * verified 统一置 0：老数据由早期注册流程写入，系统从未发起过验证回执，无证据证明确已验证，置 1 会虚假断言。
+     * is_primary 置 1：这些是用户当前唯一且主用的联系方式。
+     */
+    private void migrateUserIdentities() {
+        try {
+            // provider -> 源列名
+            String[][] specs = {
+                {"email", "email"},
+                {"phone", "phone"},
+                {"wechat", "wechat_openid"}
+            };
+            for (String[] spec : specs) {
+                String provider = spec[0];
+                String column = spec[1];
+                java.util.List<Long> userIds = jdbcTemplate.query(
+                        "SELECT id FROM user WHERE deleted = 0 AND " + column + " IS NOT NULL AND " + column + " <> ''",
+                        (rs, i) -> rs.getLong("id"));
+                for (Long userId : userIds) {
+                    String identifier = jdbcTemplate.queryForObject(
+                            "SELECT " + column + " FROM user WHERE id = ?", String.class, userId);
+                    if (identifier == null || identifier.isEmpty()) {
+                        continue;
+                    }
+                    Integer exists = jdbcTemplate.queryForObject(
+                            "SELECT COUNT(*) FROM user_identity WHERE provider = ? AND identifier = ?",
+                            Integer.class, provider, identifier);
+                    if (exists != null && exists > 0) {
+                        continue;
+                    }
+                    jdbcTemplate.update(
+                            "INSERT INTO user_identity (user_id, provider, identifier, verified, is_primary, created_at) "
+                                    + "VALUES (?, ?, ?, 0, 1, NOW())",
+                            userId, provider, identifier);
+                }
+            }
+            log.info("user_identity 存量迁移完成（幂等，UNIQUE(provider,identifier) 兜底）");
+        } catch (Exception e) {
+            log.warn("user_identity 存量迁移失败: {}", e.getMessage());
         }
     }
 

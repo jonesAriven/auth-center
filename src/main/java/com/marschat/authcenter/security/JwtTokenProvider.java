@@ -29,12 +29,18 @@ public class JwtTokenProvider {
     }
 
     public String generateAccessToken(Long userId, String username) {
+        return generateAccessToken(userId, username, 0L);
+    }
+
+    /** 带 token 版本号（tv）的访问令牌，用于「禁用即踢下线」：版本落后于当前值即失效 */
+    public String generateAccessToken(Long userId, String username, long tokenVersion) {
         Date now = new Date();
         Date expiryDate = new Date(now.getTime() + accessTokenExpiration);
         return Jwts.builder()
                 .subject(String.valueOf(userId))
                 .claim("username", username)
                 .claim("type", "access")
+                .claim("tv", tokenVersion)
                 .issuedAt(now)
                 .expiration(expiryDate)
                 .signWith(key)

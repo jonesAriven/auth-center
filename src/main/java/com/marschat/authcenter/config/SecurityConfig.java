@@ -3,6 +3,7 @@ package com.marschat.authcenter.config;
 import com.marschat.authcenter.security.JwtAuthenticationFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -127,6 +128,21 @@ public class SecurityConfig {
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
+        return http.build();
+    }
+
+    /**
+     * 链4：邮箱验证码登录（独立端点，不接入现有 /auth/login 主链路，避免回归）。
+     * 发码 / 验码登录均匿名可访问；order 高于链3("/**")以确保优先匹配。
+     */
+    @Bean
+    @Order(1)
+    public SecurityFilterChain mailCodeLoginSecurityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/auth/mail-login/**")
+            .csrf(AbstractHttpConfigurer::disable)
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth.anyRequest().permitAll());
         return http.build();
     }
 

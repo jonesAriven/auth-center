@@ -1,8 +1,10 @@
 package com.marschat.authcenter.controller;
 
+import com.marschat.authcenter.authenticator.MailCodeAuthenticator;
 import com.marschat.authcenter.dto.ForgotPasswordRequest;
 import com.marschat.authcenter.dto.LoginRequest;
 import com.marschat.authcenter.dto.LoginResponse;
+import com.marschat.authcenter.dto.MailLoginRequest;
 import com.marschat.authcenter.dto.RefreshRequest;
 import com.marschat.authcenter.dto.ResetPasswordRequest;
 import com.marschat.authcenter.entity.User;
@@ -24,6 +26,7 @@ public class AuthController {
     private final AuthService authService;
     private final UserService userService;
     private final SsoCookieUtil ssoCookieUtil;
+    private final MailCodeAuthenticator mailCodeAuthenticator;
 
     @PostMapping("/login")
     public Result<LoginResponse> login(@Valid @RequestBody LoginRequest request, HttpServletResponse response) {
@@ -87,6 +90,34 @@ public class AuthController {
     public Result<Void> resetPassword(@Valid @RequestBody ResetPasswordRequest request) {
         authService.resetPassword(request.getEmail(), request.getCode(), request.getNewPassword());
         return Result.ok();
+    }
+
+    /**
+     * 邮箱验证码登录 - 发送验证码（公开端点）。
+     * 复用 MailCodeService 的 MAIL_LOGIN 业务类型，含 60 秒限频 / 5 次锁定。
+     */
+    @PostMapping("/mail-login/send-code")
+    public Result<Void> sendMailLoginCode(@Valid @RequestBody ForgotPasswordRequest request) {
+        mailCodeAuthenticator.issueAndSend(request.getEmail());
+        return Result.ok();
+    }
+
+    /**
+     * 邮箱验证码登录 - 校验并签发令牌（公开端点，独立链，不接入 /auth/login 主链路）。
+     */
+    @PostMapping("/mail-login")
+    public Result<LoginResponse> mailLogin(@Valid @RequestBody MailLoginRequest request, HttpServletResponse response) {
+        LoginResponse loginResponse = authService.loginByMail(request.getEmail(), request.getCode());
+
+        // ★ SSO：设置跨域 Cookie，使所有子域共享登录状态
+        if (loginResponse.getAccessToken() != null) {
+            ssoCookieUtil.setAccessTokenCookie(response, loginResponse.getAccessToken());
+            if (loginResponse.getRefreshToken() != null) {
+                ssoCookieUtil.setRefreshTokenCookie(response, loginResponse.getRefreshToken());
+            }
+        }
+
+        return Result.ok(loginResponse);
     }
 
     @GetMapping("/me")

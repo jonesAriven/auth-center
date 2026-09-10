@@ -1,6 +1,7 @@
 package com.marschat.authcenter.service;
 
 import com.marschat.authcenter.entity.User;
+import com.marschat.common.page.PageResult;
 
 import java.util.List;
 
@@ -16,7 +17,7 @@ public interface UserService {
 
     /** —— 统一用户管理（auth-center Phase 1，仅 ROLE_ADMIN）—— */
 
-    List<User> listForAdmin(String realmId);
+    PageResult<User> listForAdmin(String realmId, String keyword, int page, int size);
 
     User createUser(String username, String password, String role, String nickname,
                     String email, String realmId, Long operatorId);

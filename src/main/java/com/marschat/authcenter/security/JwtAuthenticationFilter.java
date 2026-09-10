@@ -3,6 +3,7 @@ package com.marschat.authcenter.security;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.marschat.authcenter.entity.JwtBlacklist;
 import com.marschat.authcenter.mapper.JwtBlacklistMapper;
+import com.marschat.authcenter.service.TokenVersionService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -28,6 +29,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     private final JwtTokenProvider jwtTokenProvider;
     private final UserDetailsService userDetailsService;
     private final JwtBlacklistMapper jwtBlacklistMapper;
+    private final TokenVersionService tokenVersionService;
     private final org.springframework.security.oauth2.jwt.JwtDecoder jwtDecoder;
 
     @Override
@@ -56,6 +58,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         return;
                     }
                     principal = String.valueOf(jwtTokenProvider.getUserIdFromToken(token));
+                    // token 版本校验：用户被禁用/删除后版本自增，旧 token 立即失效（踢下线）
+                    if (isTokenVersionRevoked(token, principal)) {
+                        sendUnauthorized(response, "Token已失效");
+                        return;
+                    }
                 } else {
                     // OIDC RS256 token（auth-center 签发，claims: uid/username/role）
                     try {
@@ -100,6 +107,20 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                         .eq(JwtBlacklist::getToken, token)
                         .gt(JwtBlacklist::getExpireAt, LocalDateTime.now())
         ) > 0;
+    }
+
+    /** 校验 legacy access token 的版本号是否落后于用户当前版本（落后即视为被踢下线） */
+    private boolean isTokenVersionRevoked(String token, String userIdStr) {
+        try {
+            Long tokenVersion = jwtTokenProvider.parseToken(token).get("tv", Long.class);
+            if (tokenVersion == null) {
+                return false; // OIDC token 或版本化前签发，不做版本校验
+            }
+            long current = tokenVersionService.currentVersion(Long.parseLong(userIdStr));
+            return tokenVersion < current;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void sendUnauthorized(HttpServletResponse response, String message) throws IOException {

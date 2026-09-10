@@ -12,6 +12,9 @@ public interface AuthService {
 
     LoginResponse refresh(RefreshRequest request);
 
+    /** 邮箱验证码登录：校验 MAIL_LOGIN 验证码 -> 签发令牌（独立端点，不接入 /auth/login 主链路） */
+    LoginResponse loginByMail(String email, String code);
+
     /** 忘记密码：按邮箱发验证码（防枚举，始终返回成功） */
     void forgotPassword(String email);
 

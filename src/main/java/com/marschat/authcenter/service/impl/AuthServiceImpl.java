@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.marschat.authcenter.dto.LoginRequest;
 import com.marschat.authcenter.dto.LoginResponse;
 import com.marschat.authcenter.dto.RefreshRequest;
+import com.marschat.authcenter.authenticator.AuthenticationContext;
+import com.marschat.authcenter.authenticator.MailCodeAuthenticator;
 import com.marschat.authcenter.entity.JwtBlacklist;
 import com.marschat.authcenter.entity.RefreshToken;
 import com.marschat.authcenter.entity.User;
@@ -15,6 +17,7 @@ import com.marschat.authcenter.security.JwtTokenProvider;
 import com.marschat.authcenter.service.AuthService;
 import com.marschat.authcenter.service.MailCodeService;
 import com.marschat.authcenter.service.MailService;
+import com.marschat.authcenter.service.TokenVersionService;
 import com.marschat.common.event.AppEvent;
 import com.marschat.common.exception.BusinessException;
 import lombok.RequiredArgsConstructor;
@@ -41,6 +44,8 @@ public class AuthServiceImpl implements AuthService {
     private final RedisTemplate<String, Object> redisTemplate;
     private final MailService mailService;
     private final MailCodeService mailCodeService;
+    private final MailCodeAuthenticator mailCodeAuthenticator;
+    private final TokenVersionService tokenVersionService;
 
     /** 忘记密码 / 重置密码 业务类型标识 */
     private static final String BIZ_RESET_PASSWORD = "RESET_PASSWORD";
@@ -63,7 +68,8 @@ public class AuthServiceImpl implements AuthService {
             throw new BusinessException("用户名或密码错误");
         }
 
-        String accessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername());
+        String accessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername(),
+                tokenVersionService.currentVersion(user.getId()));
         String refreshToken = jwtTokenProvider.generateRefreshToken(user.getId());
 
         RefreshToken rt = new RefreshToken();
@@ -136,7 +142,8 @@ public class AuthServiceImpl implements AuthService {
                         .eq(RefreshToken::getUserId, userId)
                         .eq(RefreshToken::getToken, refreshToken));
 
-        String newAccessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername());
+        String newAccessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername(),
+                tokenVersionService.currentVersion(user.getId()));
         String newRefreshToken = jwtTokenProvider.generateRefreshToken(user.getId());
 
         RefreshToken rt = new RefreshToken();
@@ -147,6 +154,40 @@ public class AuthServiceImpl implements AuthService {
 
         user.setPassword(null);
         return new LoginResponse(newAccessToken, newRefreshToken, jwtTokenProvider.getAccessTokenExpiration(), user);
+    }
+
+    @Override
+    @Transactional
+    public LoginResponse loginByMail(String email, String code) {
+        // 校验 MAIL_LOGIN 验证码（一次性，失败/过期/锁定均抛异常）；与「忘记密码」共用 Redis 凭证体系
+        AuthenticationContext ctx = new AuthenticationContext();
+        ctx.setTarget(email);
+        ctx.setCode(code);
+        mailCodeAuthenticator.authenticate(ctx);
+
+        User user = userMapper.selectOne(new LambdaQueryWrapper<User>()
+                .eq(User::getEmail, email).last("LIMIT 1"));
+        if (user == null) {
+            throw new BusinessException("邮箱未绑定账号");
+        }
+        if (user.getStatus() == 0) {
+            throw new BusinessException("用户已被禁用");
+        }
+
+        String accessToken = jwtTokenProvider.generateAccessToken(user.getId(), user.getUsername(),
+                tokenVersionService.currentVersion(user.getId()));
+        String refreshToken = jwtTokenProvider.generateRefreshToken(user.getId());
+
+        RefreshToken rt = new RefreshToken();
+        rt.setUserId(user.getId());
+        rt.setToken(refreshToken);
+        rt.setExpireAt(LocalDateTime.now().plusDays(7));
+        refreshTokenMapper.insert(rt);
+
+        publishEvent("user.login.mail", user.getId(), Map.of("username", user.getUsername()));
+        log.info("邮箱验证码登录成功 userId={}, username={}", user.getId(), user.getUsername());
+        user.setPassword(null);
+        return new LoginResponse(accessToken, refreshToken, jwtTokenProvider.getAccessTokenExpiration(), user);
     }
 
     @Override

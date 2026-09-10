@@ -1,13 +1,20 @@
 package com.marschat.authcenter.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.marschat.authcenter.entity.RefreshToken;
 import com.marschat.authcenter.entity.User;
+import com.marschat.authcenter.mapper.RefreshTokenMapper;
 import com.marschat.authcenter.mapper.UserMapper;
+import com.marschat.authcenter.service.OperationLogService;
+import com.marschat.authcenter.service.TokenVersionService;
 import com.marschat.authcenter.service.UserService;
 import com.marschat.common.exception.BusinessException;
+import com.marschat.common.page.PageResult;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
@@ -15,8 +22,13 @@ import java.util.List;
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
 
+    private static final String ROLE_SUPERADMIN = "superadmin";
+
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
+    private final RefreshTokenMapper refreshTokenMapper;
+    private final OperationLogService operationLogService;
+    private final TokenVersionService tokenVersionService;
 
     @Override
     public User getProfile(Long userId) {
@@ -75,18 +87,25 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
-    public List<User> listForAdmin(String realmId) {
+    public PageResult<User> listForAdmin(String realmId, String keyword, int page, int size) {
+        Page<User> pageObj = new Page<>(page, size);
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<User>()
                 .orderByDesc(User::getCreatedAt);
         if (realmId != null && !realmId.isBlank()) {
             wrapper.eq(User::getRealmId, realmId);
         }
-        List<User> users = userMapper.selectList(wrapper);
-        users.forEach(u -> u.setPassword(null));
-        return users;
+        if (keyword != null && !keyword.isBlank()) {
+            wrapper.and(q -> q.like(User::getUsername, keyword)
+                    .or().like(User::getEmail, keyword)
+                    .or().like(User::getNickname, keyword));
+        }
+        Page<User> result = userMapper.selectPage(pageObj, wrapper);
+        result.getRecords().forEach(u -> u.setPassword(null));
+        return PageResult.of(result.getRecords(), result.getTotal(), page, size);
     }
 
     @Override
+    @Transactional
     public User createUser(String username, String password, String role, String nickname,
                            String email, String realmId, Long operatorId) {
         if (username == null || !username.matches("^[a-zA-Z0-9_.-]{2,50}$")) {
@@ -113,25 +132,43 @@ public class UserServiceImpl implements UserService {
         user.setStatus(1);
         userMapper.insert(user);
         user.setPassword(null);
+
+        operationLogService.log(operatorId, operatorName(operatorId), "user.create",
+                "user", user.getId(), "创建用户 " + username + ", role=" + normalizedRole, null);
         return user;
     }
 
     @Override
+    @Transactional
     public User updateUser(Long userId, String role, Integer status, String nickname,
                            String email, Long operatorId) {
         User user = userMapper.selectById(userId);
         if (user == null) {
             throw new BusinessException("用户不存在");
         }
-        // 边界保护：不能把自己降级或禁用（防误操作锁死在管理界面外）
+        boolean targetSuper = ROLE_SUPERADMIN.equals(user.getRole());
+        String opName = operatorName(operatorId);
+
+        // 自身保护（防误操作锁死在管理界面外）
         if (userId.equals(operatorId)) {
-            if (role != null && !"admin".equals(normalizeRole(role))) {
+            if (role != null && !"admin".equals(normalizeRole(role)) && !ROLE_SUPERADMIN.equals(normalizeRole(role))) {
                 throw new BusinessException("不能修改自己的角色");
             }
             if (status != null && status == 0) {
                 throw new BusinessException("不能禁用自己");
             }
         }
+        // superadmin 不可被降级 / 禁用（任何操作者，含自己）
+        if (targetSuper) {
+            if (role != null && !ROLE_SUPERADMIN.equals(normalizeRole(role))) {
+                throw new BusinessException("超级管理员不可被降级");
+            }
+            if (status != null && status == 0) {
+                throw new BusinessException("超级管理员不可被禁用");
+            }
+        }
+
+        boolean disabling = status != null && status == 0 && user.getStatus() != 0;
         if (role != null) {
             user.setRole(normalizeRole(role));
         }
@@ -145,11 +182,20 @@ public class UserServiceImpl implements UserService {
             user.setEmail(email);
         }
         userMapper.updateById(user);
+
+        // 禁用即踢下线：版本 +1 使已签发 token 立即失效，并回收 refresh token
+        if (disabling) {
+            revokeUserTokens(userId);
+        }
+
+        operationLogService.log(operatorId, opName, "user.update", "user", userId,
+                "更新用户 status=" + user.getStatus() + ", role=" + user.getRole(), null);
         user.setPassword(null);
         return user;
     }
 
     @Override
+    @Transactional
     public void deleteUser(Long userId, Long operatorId) {
         if (userId.equals(operatorId)) {
             throw new BusinessException("不能删除自己");
@@ -158,7 +204,14 @@ public class UserServiceImpl implements UserService {
         if (user == null) {
             throw new BusinessException("用户不存在");
         }
-        // 边界保护：保护最后一个管理员
+        String opName = operatorName(operatorId);
+
+        // superadmin 不可删除（任何操作者）。配合「不可降级 / 不可禁用」，superadmin 集合恒定，
+        // 因此无需再单独统计保底数量
+        if (ROLE_SUPERADMIN.equals(user.getRole())) {
+            throw new BusinessException("超级管理员不可删除");
+        }
+        // 保底：至少保留 1 个 status=1 的 admin（沿用原逻辑）
         if ("admin".equals(user.getRole())) {
             Long adminCount = userMapper.selectCount(new LambdaQueryWrapper<User>()
                     .eq(User::getRole, "admin").eq(User::getStatus, 1));
@@ -166,10 +219,15 @@ public class UserServiceImpl implements UserService {
                 throw new BusinessException("系统至少保留一个管理员，禁止删除");
             }
         }
-        userMapper.deleteById(userId);
+
+        userMapper.deleteById(userId); // @TableLogic 软删除
+        revokeUserTokens(userId);      // 删除即踢下线
+        operationLogService.log(operatorId, opName, "user.delete", "user", userId,
+                "删除用户 " + user.getUsername(), null);
     }
 
     @Override
+    @Transactional
     public void resetPassword(Long userId, String newPassword, Long operatorId) {
         if (newPassword == null || newPassword.length() < 6) {
             throw new BusinessException("密码长度至少6位");
@@ -180,6 +238,10 @@ public class UserServiceImpl implements UserService {
         }
         user.setPassword(passwordEncoder.encode(newPassword));
         userMapper.updateById(user);
+
+        revokeUserTokens(userId); // 改密即踢下线
+        operationLogService.log(operatorId, operatorName(operatorId), "user.reset_password",
+                "user", userId, "管理员重置密码 " + user.getUsername(), null);
     }
 
     private String normalizeRole(String role) {
@@ -187,9 +249,23 @@ public class UserServiceImpl implements UserService {
             return "user";
         }
         String r = role.trim().toLowerCase();
-        if (!"admin".equals(r) && !"user".equals(r)) {
-            throw new BusinessException("角色只允许 admin/user");
+        if (!"admin".equals(r) && !"user".equals(r) && !ROLE_SUPERADMIN.equals(r)) {
+            throw new BusinessException("角色只允许 admin/user/" + ROLE_SUPERADMIN);
         }
         return r;
+    }
+
+    /** 使该用户已签发 token 失效并回收 refresh token（禁用/删除/改密共用） */
+    private void revokeUserTokens(Long userId) {
+        tokenVersionService.bump(userId);
+        refreshTokenMapper.delete(new LambdaQueryWrapper<RefreshToken>().eq(RefreshToken::getUserId, userId));
+    }
+
+    private String operatorName(Long operatorId) {
+        if (operatorId == null) {
+            return null;
+        }
+        User op = userMapper.selectById(operatorId);
+        return op == null ? null : op.getUsername();
     }
 }

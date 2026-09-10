@@ -3,6 +3,7 @@ package com.marschat.authcenter.controller;
 import com.marschat.authcenter.entity.User;
 import com.marschat.authcenter.service.UserService;
 import com.marschat.authcenter.util.SecurityUtils;
+import com.marschat.common.page.PageResult;
 import com.marschat.common.result.Result;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -23,10 +24,14 @@ public class AdminUserController {
 
     private final UserService userService;
 
-    /** 用户列表（含禁用），可按 realm 过滤 */
+    /** 用户列表（含禁用），支持 realm 过滤、关键字搜索（username/email/nickname）、分页 */
     @GetMapping
-    public Result<List<User>> list(@RequestParam(required = false) String realmId) {
-        return Result.ok(userService.listForAdmin(realmId));
+    public Result<PageResult<User>> list(
+            @RequestParam(required = false) String realmId,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return Result.ok(userService.listForAdmin(realmId, keyword, page, size));
     }
 
     @PostMapping
