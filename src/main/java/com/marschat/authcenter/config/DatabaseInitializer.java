@@ -312,8 +312,9 @@ public class DatabaseInitializer implements CommandLineRunner {
                 repository.save(updated);
                 log.info("已更新 marschat-portal 回调白名单: {}", requiredRedirects);
             }
-            seedKbwebClient(repository);
-            seedInframonClient(repository);
+        seedKbwebClient(repository);
+        seedKbopsClient(repository);
+        seedInframonClient(repository);
             seedP2Clients(repository);
         } catch (Exception e) {
             log.warn("种子 OIDC 客户端失败: {}", e.getMessage());
@@ -432,6 +433,54 @@ public class DatabaseInitializer implements CommandLineRunner {
             }
         } catch (Exception e) {
             log.warn("种子 OIDC 客户端 marschat-inframon 失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 种子 kb-ops 运维平台前端 SPA 专用 public client（PKCE，无 secret）。
+     * 与 kb-web 同构：纯前端无法安全持有 client_secret，走 authorization_code + PKCE。
+     */
+    private void seedKbopsClient(JdbcRegisteredClientRepository repository) {
+        java.util.List<String> requiredRedirects = java.util.List.of(
+                "http://localhost:3001/ops/sso-callback",
+                "https://kb.marschat.online/ops/sso-callback",
+                "http://192.168.31.105/ops/sso-callback");
+        try {
+            RegisteredClient existing = repository.findByClientId("marschat-kbops");
+            if (existing == null) {
+                RegisteredClient kbops = RegisteredClient.withId(UUID.randomUUID().toString())
+                        .clientId("marschat-kbops")
+                        .clientName("MarsChat KB Ops (SPA)")
+                        .clientAuthenticationMethod(ClientAuthenticationMethod.NONE)
+                        .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
+                        .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
+                        .redirectUris(r -> r.addAll(requiredRedirects))
+                        .scope(OidcScopes.OPENID)
+                        .scope(OidcScopes.PROFILE)
+                        .clientSettings(ClientSettings.builder()
+                                .requireAuthorizationConsent(false)
+                                .requireProofKey(true)
+                                .build())
+                        .tokenSettings(org.springframework.security.oauth2.server.authorization.settings.TokenSettings.builder()
+                                .accessTokenTimeToLive(java.time.Duration.ofMinutes(30))
+                                .refreshTokenTimeToLive(java.time.Duration.ofDays(7))
+                                .reuseRefreshTokens(false)
+                                .build())
+                        .build();
+                repository.save(kbops);
+                log.info("种子 OIDC 客户端 marschat-kbops（public/PKCE）已就绪");
+            } else if (!existing.getRedirectUris().containsAll(requiredRedirects)) {
+                RegisteredClient updated = RegisteredClient.from(existing)
+                        .redirectUris(r -> {
+                            r.clear();
+                            r.addAll(requiredRedirects);
+                        })
+                        .build();
+                repository.save(updated);
+                log.info("已更新 marschat-kbops 回调白名单: {}", requiredRedirects);
+            }
+        } catch (Exception e) {
+            log.warn("种子 OIDC 客户端 marschat-kbops 失败: {}", e.getMessage());
         }
     }
 
