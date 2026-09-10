@@ -29,16 +29,14 @@ steps:
       - mvn -s ci-settings.xml clean package -DskipTests -B -ntp -Dmaven.repo.local=/root/.m2/repository
       - echo "=== [2/4] 清理 CRLF（开发机是 Windows，git 可能存 CRLF；Linux 执行会报 bad interpreter）==="
       - sed -i 's/\r$//' scripts/deploy.sh
-      - echo "=== [3/4] 收集产物（jar + Dockerfile + deploy.sh，服务器侧自包含）==="
-      - rm -rf /mnt/shared/woodScript/publish/auth-center
-      - mkdir -p /mnt/shared/woodScript/publish/auth-center
-      - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/woodScript/publish/auth-center/
-      - echo "=== [4/4] 打包发布 ==="
-      # 注意：直接对 /mnt/shared（bind mount）里的目录打 tar 会报 "file changed as we read it"
-      # （挂载文件系统 stat 抖动），先在容器本地 /tmp 打包再搬过去
-      - tar -czf /tmp/auth-center-latest.tar.gz -C /mnt/shared/woodScript/publish/auth-center .
-      - mv /tmp/auth-center-latest.tar.gz /mnt/shared/woodScript/publish/auth-center-latest.tar.gz
-      - ls -lh /mnt/shared/woodScript/publish/auth-center-latest.tar.gz
+      - echo "=== [3/4] 产物直写最终目录 ==="
+      # /mnt/shared（bind mount）上打 tar 会报 "file changed as we read it"（连写 /tmp 再搬都复现，
+      # 是挂载文件系统 stat 抖动），干脆放弃 tar.gz：产物 = 目录本身，deploy 直接执行
+      - rm -rf /mnt/shared/auth-center-build
+      - mkdir -p /mnt/shared/auth-center-build
+      - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
+      - sync
+      - ls -lh /mnt/shared/auth-center-build
       - echo "OK auth-center build done"
 
   # ==================== deploy：SSH 到服务器部署 ====================
@@ -53,10 +51,6 @@ steps:
       script_stop: false
       command_timeout: 20m
       script:
-        - echo "=== 解压 CI 产物到构建上下文目录 ==="
-        - rm -rf /mnt/shared/auth-center-build
-        - mkdir -p /mnt/shared/auth-center-build
-        - tar -xzf /mnt/shared/woodScript/publish/auth-center-latest.tar.gz -C /mnt/shared/auth-center-build
+        - echo "=== 校验产物后执行部署（含 8085 健康检查）==="
         - ls -lh /mnt/shared/auth-center-build
-        - echo "=== 执行部署（含 8085 健康检查）==="
         - bash /mnt/shared/auth-center-build/deploy.sh
