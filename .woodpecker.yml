@@ -1,0 +1,59 @@
+# ============================================================
+# auth-center 独立流水线（Woodpecker repo_id=4，分支 main）
+# ============================================================
+# 背景：auth-center 2026-09-07 从 devtools 剥离为独立仓库，但一直没建自己的流水线，
+#       而是寄生在 mykng 流水线的 deploy-mykng.sh Step 0.5（服务器 git pull + 本地 mvn）。
+#       问题：改枢纽必须连带重建 4 个 mykng 服务、无法单独回滚、依赖服务器本地 mvn 与 Nexus。
+#       本流水线把 auth-center 拆出来，CI 构建产物 + 独立部署，compose 的 build context
+#       也从 /root/auth-center 改为 /mnt/shared/auth-center-build（产物目录）。
+#
+# 触发：push 到 main 自动跑；或在 Woodpecker 手动触发（manual）
+# 前置：Woodpecker 已注册本仓库，且已配置 secret `ssh_key_mykng`（mykng 服务器 SSH 私钥）
+# ============================================================
+
+when:
+  event: [push, manual]
+  branch: [main]
+
+steps:
+  # ==================== build：CI 容器内打包 ====================
+  - name: build
+    image: maven:3.9-eclipse-temurin-21
+    volumes:
+      - /mnt/shared:/mnt/shared
+      - /root/.m2:/root/.m2
+    environment:
+      MAVEN_OPTS: -Xmx2048m
+    commands:
+      - echo "=== [1/4] Maven 打包（走 Nexus 私服，见 ci-settings.xml）==="
+      - mvn -s ci-settings.xml clean package -DskipTests -B -ntp -Dmaven.repo.local=/root/.m2/repository
+      - echo "=== [2/4] 清理 CRLF（开发机是 Windows，git 可能存 CRLF；Linux 执行会报 bad interpreter）==="
+      - sed -i 's/\r$//' scripts/deploy.sh
+      - echo "=== [3/4] 收集产物（jar + Dockerfile + deploy.sh，服务器侧自包含）==="
+      - rm -rf /mnt/shared/woodScript/publish/auth-center
+      - mkdir -p /mnt/shared/woodScript/publish/auth-center
+      - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/woodScript/publish/auth-center/
+      - echo "=== [4/4] 打包发布 ==="
+      - tar -czf /mnt/shared/woodScript/publish/auth-center-latest.tar.gz -C /mnt/shared/woodScript/publish/auth-center .
+      - ls -lh /mnt/shared/woodScript/publish/auth-center-latest.tar.gz
+      - echo "OK auth-center build done"
+
+  # ==================== deploy：SSH 到服务器部署 ====================
+  - name: deploy
+    image: appleboy/drone-ssh
+    depends_on: [build]
+    settings:
+      host: 192.168.31.105
+      username: root
+      key: { from_secret: ssh_key_mykng }
+      port: 22
+      script_stop: false
+      command_timeout: 20m
+      script:
+        - echo "=== 解压 CI 产物到构建上下文目录 ==="
+        - rm -rf /mnt/shared/auth-center-build
+        - mkdir -p /mnt/shared/auth-center-build
+        - tar -xzf /mnt/shared/woodScript/publish/auth-center-latest.tar.gz -C /mnt/shared/auth-center-build
+        - ls -lh /mnt/shared/auth-center-build
+        - echo "=== 执行部署（含 8085 健康检查）==="
+        - bash /mnt/shared/auth-center-build/deploy.sh

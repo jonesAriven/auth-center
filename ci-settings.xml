@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  auth-center CI 专用 Maven 配置。
+
+  为什么需要它：
+    auth-center 的 pom.xml 没有 <repositories> 段（不像 kb-ops / infra-monitor 那样显式声明私服），
+    它依赖执行环境的全局 settings.xml 去解析内部依赖 com.marschat:common-core。
+    以前是在服务器上手动 mvn，用的是 /root/.m2/settings.xml；改成 CI 构建后，
+    CI 容器没有那份配置，会直连 Maven Central（慢 / 不稳 / 违反「包管理必须走 Nexus」）。
+
+  与服务器 /root/.m2/settings.xml 的差异：
+    - 用公网域名 nexus.marschat.online（CI agent 走公网，内网 192.168.31.105:8081 不一定可达）
+    - 不写 <servers> 凭据：CI 只做「读依赖 + 打包」，不发布构件，无需认证
+-->
+<settings>
+  <mirrors>
+    <mirror>
+      <id>nexus</id>
+      <mirrorOf>*</mirrorOf>
+      <url>https://nexus.marschat.online/repository/maven-public/</url>
+    </mirror>
+  </mirrors>
+  <profiles>
+    <profile>
+      <id>nexus</id>
+      <repositories>
+        <repository>
+          <id>central</id>
+          <url>https://nexus.marschat.online/repository/maven-public/</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>true</enabled></snapshots>
+        </repository>
+      </repositories>
+      <pluginRepositories>
+        <pluginRepository>
+          <id>central</id>
+          <url>https://nexus.marschat.online/repository/maven-public/</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>true</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+  <activeProfiles>
+    <activeProfile>nexus</activeProfile>
+  </activeProfiles>
+</settings>
