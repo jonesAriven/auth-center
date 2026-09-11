@@ -416,6 +416,7 @@ public class DatabaseInitializer implements CommandLineRunner {
         seedKbopsClient(repository);
         seedInframonClient(repository);
             seedP2Clients(repository);
+            seedAppClients(repository);
         } catch (Exception e) {
             log.warn("种子 OIDC 客户端失败: {}", e.getMessage());
         }
@@ -485,6 +486,28 @@ public class DatabaseInitializer implements CommandLineRunner {
         } catch (Exception e) {
             log.warn("种子 OIDC 客户端 {} 失败: {}", clientId, e.getMessage());
         }
+    }
+
+    /**
+     * 存量应用补齐 OIDC 客户端（台账 L023 / L031）。
+     * 两者此前未在 auth-center 注册 → 前端点「统一认证登录」必 400（未注册 client 与
+     * redirect_uri 不在白名单返回同一个 400，只有查库能区分）。
+     * clientId 以各应用源码实际值为准：myfrp=frp-manager，cosmic-studio=cosmic-studio。
+     * 回调地址按「部署 origin 动态拼接 /sso-callback」的既有实现，故三入口（公网/内网/本地开发）全列。
+     */
+    private void seedAppClients(JdbcRegisteredClientRepository repository) {
+        // myfrp（容器 frp-manager，宿主机 18082；公网经 frp.marschat.online 隧道）
+        seedPublicClient(repository, "frp-manager", "MarsChat FRP Manager",
+                java.util.List.of(
+                        "https://frp.marschat.online/sso-callback",
+                        "http://192.168.31.105:18082/sso-callback",
+                        "http://localhost:5173/sso-callback"));
+        // cosmic-studio（前端 SPA，容器 cosmic-web 宿主机 8310）
+        seedPublicClient(repository, "cosmic-studio", "MarsChat COSMIC Studio",
+                java.util.List.of(
+                        "http://192.168.31.105:8310/sso-callback",
+                        "http://localhost:5173/sso-callback",
+                        "http://localhost:8310/sso-callback"));
     }
 
     /**

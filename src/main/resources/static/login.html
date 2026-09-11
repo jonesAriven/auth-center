@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MarsChat 统一认证</title>
+  <style>
+    :root { --brand: #2563eb; --brand-dark: #1d4ed8; --text: #1f2937; --muted: #6b7280; --border: #d1d5db; --bg: #f3f4f6; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+           background: linear-gradient(135deg, #eef2ff 0%, var(--bg) 100%);
+           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--text); }
+    .card { width: 100%; max-width: 400px; background: #fff; border-radius: 14px; padding: 40px 36px 32px;
+            box-shadow: 0 10px 40px rgba(15, 23, 42, .10); }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .logo { width: 34px; height: 34px; border-radius: 9px; background: var(--brand); color: #fff;
+            display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; }
+    h1 { font-size: 19px; margin: 0; font-weight: 600; }
+    .subtitle { color: var(--muted); font-size: 13px; margin: 0 0 26px 44px; }
+    label { display: block; font-size: 13px; margin-bottom: 6px; color: #374151; }
+    input[type=text], input[type=password] { width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid var(--border);
+            border-radius: 8px; outline: none; transition: border-color .15s, box-shadow .15s; }
+    input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(37, 99, 235, .12); }
+    .field { margin-bottom: 16px; }
+    button { width: 100%; padding: 11px; font-size: 15px; font-weight: 600; color: #fff; background: var(--brand);
+             border: none; border-radius: 8px; cursor: pointer; transition: background .15s; }
+    button:hover { background: var(--brand-dark); }
+    .row { display: flex; justify-content: space-between; align-items: center; margin: 14px 0 20px; }
+    .row a { font-size: 13px; color: var(--brand); text-decoration: none; }
+    .row a:hover { text-decoration: underline; }
+    .remember { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+    .error { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; font-size: 13px;
+             padding: 9px 12px; border-radius: 8px; margin-bottom: 16px; }
+    .error.show { display: block; }
+    .footer { text-align: center; font-size: 12px; color: var(--muted); margin-top: 22px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo">M</div>
+      <h1>MarsChat 统一认证</h1>
+    </div>
+    <p class="subtitle">使用平台账号登录，一次授权访问全部应用</p>
+
+    <div class="error" id="err">用户名或密码错误，请重试</div>
+
+    <form method="post" action="/login" id="loginForm">
+      <div class="field">
+        <label for="username">用户名 / 邮箱</label>
+        <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+      </div>
+      <div class="field">
+        <label for="password">密码</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <div class="row">
+        <label class="remember"><input type="checkbox" name="remember-me"> 记住我</label>
+        <a href="/forgot-password.html">忘记密码？</a>
+      </div>
+      <button type="submit">登 录</button>
+    </form>
+
+    <div class="footer">MarsChat 平台认证中心</div>
+  </div>
+
+  <script>
+    // Spring Security 失败跳转 loginPage + "?error"；登出带 "?logout"
+    var q = new URLSearchParams(location.search);
+    if (q.has('error')) document.getElementById('err').classList.add('show');
+    if (q.has('logout')) document.getElementById('err').textContent = '您已安全退出';
+  </script>
+</body>
+</html>

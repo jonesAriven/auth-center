@@ -61,7 +61,7 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .apply(authorizationServerConfigurer);
         http.exceptionHandling(e -> e.defaultAuthenticationEntryPointFor(
-                new LoginUrlAuthenticationEntryPoint("/login"),
+                new LoginUrlAuthenticationEntryPoint("/login.html"),
                 new MediaTypeRequestMatcher(MediaType.TEXT_HTML)));
         return http.build();
     }
@@ -94,15 +94,23 @@ public class SecurityConfig {
     }
 
     /**
-     * 链2：SSO 登录表单页（SAS 默认页），供浏览器授权跳转登录用。
+     * 链2：SSO 登录表单页（品牌化自定义页），供浏览器授权跳转登录用。
      * 用户名密码走 user 表（UserDetailsServiceImpl 同时支持用户名/userId 查找）。
+     *
+     * 2026-09-11（L032）：原先用 SAS/Spring 默认英文页（formLogin(withDefaults) 未指定 loginPage，
+     * 浏览器看到 <title>Please sign in</title> 的裸表单）。改为静态 login.html（品牌 + 忘记密码入口），
+     * 登录提交仍走 Spring Security 的 POST /login（UsernamePasswordAuthenticationFilter），不进 MVC。
+     * 同批放行 /forgot-password.html —— 该页同时是 myfrp 登录页「忘记密码」历史死链指向的地址（L029）。
      */
     @Bean
     public SecurityFilterChain loginPageSecurityFilterChain(HttpSecurity http) throws Exception {
         http
-            .securityMatcher("/login", "/error")
+            .securityMatcher("/login", "/login.html", "/forgot-password.html", "/error")
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
-            .formLogin(org.springframework.security.config.Customizer.withDefaults())
+            .formLogin(form -> form
+                    .loginPage("/login.html")
+                    .loginProcessingUrl("/login")
+                    .permitAll())
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
             .csrf(AbstractHttpConfigurer::disable);
         return http.build();
