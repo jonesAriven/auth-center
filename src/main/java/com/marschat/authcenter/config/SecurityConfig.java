@@ -139,6 +139,8 @@ public class SecurityConfig {
                 "https://auth.marschat.online",
                 "http://192.168.31.105:8085",
                 "http://localhost:8085",
+                // cosmic-studio 方案A 接入（cosmic.marschat.online 前端跨源探针 /auth/session）
+                "https://cosmic.marschat.online",
                 "https://main.marschat.online",
                 "https://kb.marschat.online",
                 "https://monitor.marschat.online",
