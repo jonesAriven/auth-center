@@ -188,14 +188,21 @@ public class AuthController {
         // 1) 清跨域 SSO Cookie（任何登录方式都做）
         ssoCookieUtil.clearSsoCookies(response);
 
+        // ★ 防开放重定向：回跳地址必须落在本平台域名/内网开发地址白名单内，否则一律丢弃。
+        //   有 hint 时 SAS 也会校验一次（按客户端 post_logout_redirect_uris），
+        //   但无 hint 分支是「我们自己 302」，不校验就是公开的跳板，必须自己把关。
+        String safeRedirect = isAllowedRedirect(postLogoutRedirectUri) ? postLogoutRedirectUri : null;
+
         boolean hasHint = idTokenHint != null && !idTokenHint.isBlank();
         if (hasHint) {
             // 2a) 有 id_token_hint：交给 SAS 销毁 IdP 会话 + 校验回跳白名单
-            //     用相对路径，公网域与内网直连都能落到同一个 SAS 端点
-            StringBuilder sb = new StringBuilder("/connect/logout");
+            // ★ 必须用绝对地址：sendRedirect 的 Location 由容器按 request 推断，
+            //   经 nginx 反代时会被推断成 http://（scheme 降级），
+            //   在「HSTS / Secure Cookie」下这一步会丢 JSESSIONID 导致登出失败（2026-09-11 实测）。
+            StringBuilder sb = new StringBuilder(publicBaseUrl(request)).append("/connect/logout");
             sb.append("?id_token_hint=").append(enc(idTokenHint));
-            if (postLogoutRedirectUri != null && !postLogoutRedirectUri.isBlank()) {
-                sb.append("&post_logout_redirect_uri=").append(enc(postLogoutRedirectUri));
+            if (safeRedirect != null) {
+                sb.append("&post_logout_redirect_uri=").append(enc(safeRedirect));
             }
             if (state != null && !state.isBlank()) {
                 sb.append("&state=").append(enc(state));
@@ -213,9 +220,100 @@ public class AuthController {
         } catch (Exception e) {
             log.warn("SLO 会话销毁失败（不影响回跳）: {}", e.getMessage());
         }
-        response.sendRedirect(
-                postLogoutRedirectUri != null && !postLogoutRedirectUri.isBlank()
-                        ? postLogoutRedirectUri : "/login.html");
+        response.sendRedirect(safeRedirect != null ? safeRedirect : publicBaseUrl(request) + "/login.html");
+    }
+
+    /**
+     * 还原「用户浏览器眼中」的本服务基地址（scheme://host[:port]）。
+     * <p>
+     * 反代链路：浏览器 → 腾讯云2号 nginx(TLS 终结) → mykng nginx → 容器。
+     * 容器看到的 request 是明文 http，必须靠 {@code X-Forwarded-Proto/Host} 还原，
+     * 否则 sendRedirect 会把 https 降级成 http。
+     */
+    private static String publicBaseUrl(jakarta.servlet.http.HttpServletRequest request) {
+        String proto = firstNonBlank(
+                request.getHeader("X-Forwarded-Proto"),
+                request.getScheme());
+        // X-Forwarded-Proto 可能是 "https,http"（多级代理链），取最左
+        if (proto != null && proto.contains(",")) {
+            proto = proto.substring(0, proto.indexOf(',')).trim();
+        }
+        String host = firstNonBlank(
+                request.getHeader("X-Forwarded-Host"),
+                request.getHeader("Host"));
+        if (host != null && host.contains(",")) {
+            host = host.substring(0, host.indexOf(',')).trim();
+        }
+        if (host == null || host.isBlank()) {
+            host = request.getServerName();
+            int port = request.getServerPort();
+            boolean defaultPort = ("https".equalsIgnoreCase(proto) && port == 443)
+                    || ("http".equalsIgnoreCase(proto) && port == 80);
+            if (!defaultPort) {
+                host = host + ":" + port;
+            }
+        }
+        return (proto == null || proto.isBlank() ? "https" : proto.toLowerCase()) + "://" + host;
+    }
+
+    /**
+     * 回跳地址白名单：本平台域名（*.marschat.online）+ 内网/本机开发地址。
+     * 解析失败或不在白名单 → false（调用方降级为默认回跳）。
+     */
+    private static boolean isAllowedRedirect(String uri) {
+        if (uri == null || uri.isBlank()) {
+            return false;
+        }
+        try {
+            java.net.URI u = java.net.URI.create(uri.trim());
+            String scheme = u.getScheme();
+            if (scheme == null || !(scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https"))) {
+                return false;
+            }
+            String host = u.getHost();
+            if (host == null || host.isBlank()) {
+                return false;
+            }
+            host = host.toLowerCase();
+            if (host.equals("marschat.online") || host.endsWith(".marschat.online")) {
+                return true;
+            }
+            // 本机 / 内网开发地址（本地联调、局域网直连）
+            if (host.equals("localhost") || host.equals("127.0.0.1") || host.equals("::1")
+                    || host.equals("[::1]")) {
+                return true;
+            }
+            // RFC 1918 私网：10/8、192.168/16、172.16/12
+            String[] octets = host.split("\\.");
+            if (octets.length == 4 && isNumericOctets(octets)) {
+                int a = Integer.parseInt(octets[0]);
+                int b = Integer.parseInt(octets[1]);
+                if (a == 10 || a == 192 && b == 168 || a == 172 && b >= 16 && b <= 31) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isNumericOctets(String[] parts) {
+        for (String p : parts) {
+            if (p.isEmpty() || p.length() > 3) {
+                return false;
+            }
+            for (int i = 0; i < p.length(); i++) {
+                if (!Character.isDigit(p.charAt(i))) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static String firstNonBlank(String a, String b) {
+        return (a != null && !a.isBlank()) ? a : b;
     }
 
     /** URL 编码（UTF-8），供 SLO 拼装回跳参数 */
