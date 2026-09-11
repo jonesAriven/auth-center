@@ -121,6 +121,11 @@ public class UserServiceImpl implements UserService {
         if (exist != null && exist > 0) {
             throw new BusinessException("用户名已存在");
         }
+        // uk_username 唯一索引不区分 deleted，软删行仍占用用户名；
+        // 不预检会出现"删除后重建同名用户"撞唯一键 500（2026-09-12 实测）
+        if (userMapper.countByUsernameIncludingDeleted(username) > 0) {
+            throw new BusinessException("用户名已被历史账号占用（同名账号曾被删除），请更换用户名");
+        }
 
         User user = new User();
         user.setUsername(username);
@@ -130,7 +135,12 @@ public class UserServiceImpl implements UserService {
         user.setNickname(nickname);
         user.setEmail(email);
         user.setStatus(1);
-        userMapper.insert(user);
+        try {
+            userMapper.insert(user);
+        } catch (org.springframework.dao.DuplicateKeyException e) {
+            // 并发窗口兜底：预检通过后另一请求恰好先插入同名
+            throw new BusinessException("用户名已存在");
+        }
         user.setPassword(null);
 
         operationLogService.log(operatorId, operatorName(operatorId), "user.create",
