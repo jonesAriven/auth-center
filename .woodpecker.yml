@@ -9,6 +9,18 @@
 #
 # 触发：push 到 main 自动跑；或在 Woodpecker 手动触发（manual）
 # 前置：Woodpecker 已注册本仓库，且已配置 secret `ssh_key_mykng`（mykng 服务器 SSH 私钥）
+#
+# ⚠️ 并发事故与锁说明（重要，勿删）
+#   事故：流水线 #11（push，started=1789095435 finished=1789095711，跑 276s）与
+#        #12（manual，started=1789095527）重叠 184 秒——#11 还在跑时 #12 就触发了。
+#        两者共用固定产物目录 /mnt/shared/auth-center-build，#12 的 build 步 `cp` 撞上
+#        #11 正在执行的 deploy.sh（SMB 共享冲突）报 `cp: cannot create regular file ... File exists`；
+#        更险的是原 `find ... -exec rm -rf` 清空逻辑——若时序稍偏会在另一条 deploy 读取期间清空目录，
+#        导致 docker compose build 拿不到 jar/Dockerfile（枢纽部署灾难级失败）。本次已修：
+#          (1) 删掉 rm -rf 清空，固定 3 个产物逐项 cp 覆盖，目录里始终有完整一套；
+#          (2) 用 mkdir 原子锁 /mnt/shared/.auth-center-pipeline.lock 把 build+deploy 串行化
+#              （CIFS/nounix 上 flock 不可靠，故用 mkdir；释放用 rm -f + rmdir 而非 rm -rf）。
+#   ❗ 产物目录是共享单例：不要并行跑本仓库多条流水线 / 不要靠平台并发配置绕过本锁。
 # ============================================================
 
 when:
@@ -25,36 +37,57 @@ steps:
     environment:
       MAVEN_OPTS: -Xmx2048m
     commands:
-      - echo "=== [1/4] Maven 打包（走 Nexus 私服，见 ci-settings.xml）==="
+      - echo "=== [1/3] Maven 打包（走 Nexus 私服，见 ci-settings.xml）==="
       - mvn -s ci-settings.xml clean package -DskipTests -B -ntp -Dmaven.repo.local=/root/.m2/repository
-      - echo "=== [2/4] 清理 CRLF（开发机是 Windows，git 可能存 CRLF；Linux 执行会报 bad interpreter）==="
+      - echo "=== [2/3] 清理 CRLF（开发机是 Windows，git 可能存 CRLF；Linux 执行会报 bad interpreter）==="
       - sed -i 's/\r$//' scripts/deploy.sh
-      - echo "=== [3/4] 产物直写最终目录（保持 Maven 布局 target/，Dockerfile 的 COPY target/auth-center.jar 才能命中）==="
+      - echo "=== [3/3] 产物直写最终目录（保持 Maven 布局 target/，Dockerfile 的 COPY target/auth-center.jar 才能命中）==="
       # /mnt/shared（bind mount）上打 tar 会报 "file changed as we read it"（连写 /tmp 再搬都复现，
       # 是挂载文件系统 stat 抖动），干脆放弃 tar.gz：产物 = 目录本身，deploy 直接执行。
       # ⚠️ 清理不能用 `rm -rf <目录>`：CIFS 上删非空目录会报 "Directory not empty" 并整体失败
       #    （流水线 #6 实测），改用「逐项删除 + 兜底不阻断」，目录本身保留。
-      - mkdir -p /mnt/shared/auth-center-build
-      - find /mnt/shared/auth-center-build -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-      # ⚠️ 必须建 target/ 子目录：build context = /mnt/shared/auth-center-build，而仓库 Dockerfile 是
-      #    `COPY target/auth-center.jar`。此前把 jar 平铺在 context 根目录，COPY 永远找不到——
-      #    即切了 build context 也构建不出来，是本轮「假成功」的隐藏坑之一。
-      - mkdir -p /mnt/shared/auth-center-build/target
+      # ⚠️ 产物目录是共享单例（/mnt/shared/auth-center-build）：本仓库多流水线并发会互相踩
+      #    （见文件顶部事故说明）。下面用 mkdir 原子锁把写盘段串行化——绝不用 flock
+      #    （/mnt/shared 是 CIFS 挂载且 nounix，POSIX 文件锁不可靠），也不清空目录（逐项 cp 覆盖即可）。
       - |
+        set -e
+        LOCK=/mnt/shared/.auth-center-pipeline.lock
+        acquire_lock() {
+          waited=0
+          while ! mkdir "$LOCK" 2>/dev/null; do
+            now=$(date +%s); mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
+            if [ $((now - mt)) -gt 1500 ]; then
+              echo "  ⚠️ 锁已陈旧 $((now - mt))s，强制接管"; rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; continue
+            fi
+            waited=$((waited + 5))
+            if [ "$waited" -gt 1800 ]; then
+              echo "FATAL: 等待 auth-center 流水线锁超过 30 分钟，疑似锁泄漏。请人工检查并删除 $LOCK"; exit 1
+            fi
+            echo "  ⏳ 另一条 auth-center 流水线正在运行，等待中（已等 ${waited}s）…"; sleep 5
+          done
+          echo "pipeline=${CI_PIPELINE_NUMBER:-?} since=$(date -Is)" > "$LOCK/owner" 2>/dev/null || true
+          echo "  🔒 已获取流水线锁"
+        }
+        release_lock() { rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; }
+        # 落盘前获取锁，trap 保证异常也释放
+        acquire_lock
+        trap release_lock EXIT
+        # ⚠️ 必须建 target/ 子目录：build context = /mnt/shared/auth-center-build，而仓库 Dockerfile 是
+        #    `COPY target/auth-center.jar`。此前把 jar 平铺在 context 根目录，COPY 永远找不到——
+        #    即切了 build context 也构建不出来，是本轮「假成功」的隐藏坑之一。
+        mkdir -p /mnt/shared/auth-center-build/target
         for i in 1 2 3; do
           cp target/auth-center.jar /mnt/shared/auth-center-build/target/auth-center.jar
           sync
           [ -s /mnt/shared/auth-center-build/target/auth-center.jar ] && break
           echo "  ⚠️ jar 第 $i 次落盘失败，重试"; sleep 2
         done
-      - cp Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
-      - sync
-      # ===== 落盘硬门禁（关键）=====
-      # CIFS 上 cp 大文件曾静默失败：流水线 #7/#8 里 jar 根本没进 build 目录，build 步骤却照样
-      # 打印 "OK" 并退出 0，一路红到 deploy 的 Step1 才炸，白跑一轮且极易误判。这里前置校验，
-      # 只要有任一产物缺失或大小不符，build 立刻失败。
-      - |
-        set -e
+        cp Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
+        sync
+        # ===== 落盘硬门禁（关键）=====
+        # CIFS 上 cp 大文件曾静默失败：流水线 #7/#8 里 jar 根本没进 build 目录，build 步骤却照样
+        # 打印 "OK" 并退出 0，一路红到 deploy 的 Step1 才炸，白跑一轮且极易误判。这里前置校验，
+        # 只要有任一产物缺失或大小不符，build 立刻失败。
         test -s /mnt/shared/auth-center-build/target/auth-center.jar || { echo "FATAL: jar 未落盘"; exit 1; }
         test -s /mnt/shared/auth-center-build/Dockerfile                  || { echo "FATAL: Dockerfile 未落盘"; exit 1; }
         test -s /mnt/shared/auth-center-build/deploy.sh                   || { echo "FATAL: deploy.sh 未落盘"; exit 1; }
@@ -62,8 +95,8 @@ steps:
         DST=$(stat -c%s /mnt/shared/auth-center-build/target/auth-center.jar)
         [ "$SRC" = "$DST" ] || { echo "FATAL: jar 大小不一致 src=$SRC dst=$DST"; exit 1; }
         echo "  ✅ 产物校验通过 jar=$DST bytes"
-      - ls -lhR /mnt/shared/auth-center-build
-      - echo "OK auth-center build done"
+        ls -lhR /mnt/shared/auth-center-build
+        echo "OK auth-center build done"
 
   # ==================== deploy：SSH 到服务器部署 ====================
   - name: deploy
@@ -74,9 +107,31 @@ steps:
       username: root
       key: { from_secret: ssh_key_mykng }
       port: 22
-      script_stop: false
+      script_stop: true
       command_timeout: 20m
       script:
         - echo "=== 校验产物后执行部署（含 8085 健康检查）==="
         - ls -lh /mnt/shared/auth-center-build
-        - bash /mnt/shared/auth-center-build/deploy.sh
+        - |
+          set -e
+          LOCK=/mnt/shared/.auth-center-pipeline.lock
+          acquire_lock() {
+            waited=0
+            while ! mkdir "$LOCK" 2>/dev/null; do
+              now=$(date +%s); mt=$(stat -c %Y "$LOCK" 2>/dev/null || echo "$now")
+              if [ $((now - mt)) -gt 1500 ]; then
+                echo "  ⚠️ 锁已陈旧 $((now - mt))s，强制接管"; rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; continue
+              fi
+              waited=$((waited + 5))
+              if [ "$waited" -gt 1800 ]; then
+                echo "FATAL: 等待 auth-center 流水线锁超过 30 分钟，疑似锁泄漏。请人工检查并删除 $LOCK"; exit 1
+              fi
+              echo "  ⏳ 另一条 auth-center 流水线正在运行，等待中（已等 ${waited}s）…"; sleep 5
+            done
+            echo "pipeline=${CI_PIPELINE_NUMBER:-?} since=$(date -Is)" > "$LOCK/owner" 2>/dev/null || true
+            echo "  🔒 已获取流水线锁"
+          }
+          release_lock() { rm -f "$LOCK/owner" 2>/dev/null; rmdir "$LOCK" 2>/dev/null; }
+          acquire_lock
+          trap release_lock EXIT
+          bash /mnt/shared/auth-center-build/deploy.sh
