@@ -71,6 +71,8 @@ public class SecurityConfig {
     public org.springframework.web.cors.CorsConfigurationSource oidcCorsConfigurationSource() {
         org.springframework.web.cors.CorsConfiguration config = new org.springframework.web.cors.CorsConfiguration();
         config.setAllowedOrigins(java.util.List.of(
+                // auth-center 自身原点（同源 POST 到 /oauth2/token 等端点时不应被拦）
+                "https://auth.marschat.online",
                 "https://kb.marschat.online",
                 "http://192.168.31.105",
                 "http://localhost:5173",
@@ -133,6 +135,10 @@ public class SecurityConfig {
     public org.springframework.web.cors.CorsConfigurationSource ssoAuxCorsConfigurationSource() {
         org.springframework.web.cors.CorsConfiguration config = new org.springframework.web.cors.CorsConfiguration();
         config.setAllowedOrigins(java.util.List.of(
+                // auth-center 自身原点（同源请求不应被 CORS 拦截；表单 POST 会带 Origin 头）
+                "https://auth.marschat.online",
+                "http://192.168.31.105:8085",
+                "http://localhost:8085",
                 "https://main.marschat.online",
                 "https://kb.marschat.online",
                 "https://monitor.marschat.online",
@@ -154,7 +160,12 @@ public class SecurityConfig {
         config.setMaxAge(3600L);
         org.springframework.web.cors.UrlBasedCorsConfigurationSource source =
                 new org.springframework.web.cors.UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", config);
+        // ⚠️ 只对真正需要跨域 XHR 的两个 SSO 辅助端点生效，不要用 "/**"。
+        // 本链同时还承载 /login（浏览器表单 POST 必带 Origin 头）：
+        // 若把 CORS 全局启用，同源表单 POST 会因原点不在白名单被 CorsFilter 判为非法 → 403
+        // "Invalid CORS request"，登录被彻底打死（2026-09-11 实测回归）。
+        source.registerCorsConfiguration("/auth/session", config);
+        source.registerCorsConfiguration("/auth/slo", config);
         return source;
     }
 
