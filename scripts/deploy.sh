@@ -3,10 +3,14 @@
 # deploy.sh — auth-center 独立部署脚本（在 mykng 服务器上执行）
 # ============================================================
 # 触发方式：由 auth-center 仓库自带的 Woodpecker 流水线调用，不要手工 SSH 跑（铁律：部署走流水线）
-#   CI build  -> mvn package，产物打成 auth-center-latest.tar.gz 推到 /mnt/shared/woodScript/publish/
-#   CI deploy -> 解压到 /mnt/shared/auth-center-build/ 后执行本脚本
+#   CI build  -> mvn package，产物直写 /mnt/shared/auth-center-build/（不打包 tar.gz，见下）
+#   CI deploy -> SSH 到 mykng 执行 /mnt/shared/auth-center-build/deploy.sh
 #
-# 产物内容：auth-center.jar、Dockerfile、deploy.sh（自包含，服务器无需 git clone / 无需 mvn）
+# 产物布局（★ 关键）：target/auth-center.jar + Dockerfile + deploy.sh
+#   build context = /mnt/shared/auth-center-build，仓库 Dockerfile 写的是
+#   `COPY target/auth-center.jar`，所以 jar 必须落在 target/ 子目录，否则镜像构建失败。
+#
+# 自包含，服务器无需 git clone / 无需 mvn。
 #
 # 为什么自包含而不 source /mnt/shared/woodScript/lib-deploy.sh：
 #   auth-center 是 12 个应用的 SSO 枢纽，部署链路越短越好排查。
@@ -36,12 +40,15 @@ log " Compose   : ${COMPOSE_FILE} (project ${COMPOSE_PROJECT})"
 log "=========================================="
 
 # ====== Step 1: 校验产物 ======
+# ★ 校验的是 target/auth-center.jar（不是根目录的 auth-center.jar）：Dockerfile 的 COPY 路径即此。
 log "[1/5] 校验产物"
-[ -f "${BUILD_DIR}/auth-center.jar" ] || die "缺少 ${BUILD_DIR}/auth-center.jar（CI 产物未正确解压）"
-[ -f "${BUILD_DIR}/Dockerfile" ]       || die "缺少 ${BUILD_DIR}/Dockerfile（CI 产物未正确解压）"
-[ -f "${COMPOSE_FILE}" ]               || die "缺少 compose 文件 ${COMPOSE_FILE}（由 devtools 流水线同步）"
-JAR_SIZE=$(du -h "${BUILD_DIR}/auth-center.jar" | cut -f1)
-log "  OK auth-center.jar (${JAR_SIZE}) + Dockerfile"
+JAR="${BUILD_DIR}/target/auth-center.jar"
+[ -f "${JAR}" ]                        || die "缺少 ${JAR}（CI 产物未正确落盘）"
+[ -f "${BUILD_DIR}/Dockerfile" ]       || die "缺少 ${BUILD_DIR}/Dockerfile（CI 产物未正确落盘）"
+[ -f "${COMPOSE_FILE}" ]               || die "缺少 compose 文件 ${COMPOSE_FILE}（由 devtools 流水线 sync-ci-scripts 同步）"
+JAR_SIZE=$(du -h "${JAR}" | cut -f1)
+JAR_MD5=$(md5sum "${JAR}" | cut -d' ' -f1)
+log "  OK target/auth-center.jar (${JAR_SIZE}) md5=${JAR_MD5} + Dockerfile"
 
 # ====== Step 2: 清理 legacy 容器 ======
 # 旧 kb-auth 服务下线后仍占用 8085，必须清理，否则端口冲突导致新容器起不来。幂等。
@@ -80,7 +87,26 @@ if [ $i -gt $HEALTH_MAX_RETRIES ]; then
   die "健康检查超时（${HEALTH_MAX_RETRIES} 次未通过）"
 fi
 
-# ====== Step 5: 汇总 ======
+# ====== Step 5: 产物一致性 + 关键页面探针 ======
+# ★ 反「假成功」硬门禁。2026-09-11 流水线 #5 曾报 success，实际容器跑的是旧 jar：
+#   compose 的 build context 还指着 /root/auth-center（旧克隆），CI 产物被完全忽略，
+#   健康检查照样 200 —— 只看 health 根本发现不了。这里用 md5 把「CI 产物 == 容器内 jar」钉死。
+log "[5/5] 产物一致性校验（CI jar md5 == 容器内 /app/auth-center.jar md5）"
+RUN_MD5=$(docker exec "${CONTAINER}" md5sum /app/auth-center.jar 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+if [ -n "${JAR_MD5}" ] && [ "${JAR_MD5}" = "${RUN_MD5}" ]; then
+  log "  ✅ 一致 md5=${RUN_MD5}"
+else
+  die "容器内 jar 与 CI 产物不一致（CI=${JAR_MD5:-?} 容器=${RUN_MD5}）—— 多半是 compose 的 build context 没指向 ${BUILD_DIR}"
+fi
+
+# 品牌登录页探针：SecurityConfig.loginPage = /login.html，一旦 404，整条 SSO 授权码流程会在登录页断链。
+LOGIN_CODE=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "http://localhost:8085/login.html" || echo "000")
+if [ "${LOGIN_CODE}" = "200" ]; then
+  log "  ✅ /login.html HTTP 200"
+else
+  die "/login.html 不可达 HTTP=${LOGIN_CODE}（品牌登录页缺失会导致 SSO 登录断链）"
+fi
+
 log "[5/5] 部署完成"
 docker ps --filter "name=${CONTAINER}" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 log "=========================================="

@@ -29,16 +29,40 @@ steps:
       - mvn -s ci-settings.xml clean package -DskipTests -B -ntp -Dmaven.repo.local=/root/.m2/repository
       - echo "=== [2/4] 清理 CRLF（开发机是 Windows，git 可能存 CRLF；Linux 执行会报 bad interpreter）==="
       - sed -i 's/\r$//' scripts/deploy.sh
-      - echo "=== [3/4] 产物直写最终目录 ==="
+      - echo "=== [3/4] 产物直写最终目录（保持 Maven 布局 target/，Dockerfile 的 COPY target/auth-center.jar 才能命中）==="
       # /mnt/shared（bind mount）上打 tar 会报 "file changed as we read it"（连写 /tmp 再搬都复现，
       # 是挂载文件系统 stat 抖动），干脆放弃 tar.gz：产物 = 目录本身，deploy 直接执行。
       # ⚠️ 清理不能用 `rm -rf <目录>`：CIFS 上删非空目录会报 "Directory not empty" 并整体失败
       #    （流水线 #6 实测），改用「逐项删除 + 兜底不阻断」，目录本身保留。
       - mkdir -p /mnt/shared/auth-center-build
       - find /mnt/shared/auth-center-build -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
-      - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
+      # ⚠️ 必须建 target/ 子目录：build context = /mnt/shared/auth-center-build，而仓库 Dockerfile 是
+      #    `COPY target/auth-center.jar`。此前把 jar 平铺在 context 根目录，COPY 永远找不到——
+      #    即切了 build context 也构建不出来，是本轮「假成功」的隐藏坑之一。
+      - mkdir -p /mnt/shared/auth-center-build/target
+      - |
+        for i in 1 2 3; do
+          cp target/auth-center.jar /mnt/shared/auth-center-build/target/auth-center.jar
+          sync
+          [ -s /mnt/shared/auth-center-build/target/auth-center.jar ] && break
+          echo "  ⚠️ jar 第 $i 次落盘失败，重试"; sleep 2
+        done
+      - cp Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
       - sync
-      - ls -lh /mnt/shared/auth-center-build
+      # ===== 落盘硬门禁（关键）=====
+      # CIFS 上 cp 大文件曾静默失败：流水线 #7/#8 里 jar 根本没进 build 目录，build 步骤却照样
+      # 打印 "OK" 并退出 0，一路红到 deploy 的 Step1 才炸，白跑一轮且极易误判。这里前置校验，
+      # 只要有任一产物缺失或大小不符，build 立刻失败。
+      - |
+        set -e
+        test -s /mnt/shared/auth-center-build/target/auth-center.jar || { echo "FATAL: jar 未落盘"; exit 1; }
+        test -s /mnt/shared/auth-center-build/Dockerfile                  || { echo "FATAL: Dockerfile 未落盘"; exit 1; }
+        test -s /mnt/shared/auth-center-build/deploy.sh                   || { echo "FATAL: deploy.sh 未落盘"; exit 1; }
+        SRC=$(stat -c%s target/auth-center.jar)
+        DST=$(stat -c%s /mnt/shared/auth-center-build/target/auth-center.jar)
+        [ "$SRC" = "$DST" ] || { echo "FATAL: jar 大小不一致 src=$SRC dst=$DST"; exit 1; }
+        echo "  ✅ 产物校验通过 jar=$DST bytes"
+      - ls -lhR /mnt/shared/auth-center-build
       - echo "OK auth-center build done"
 
   # ==================== deploy：SSH 到服务器部署 ====================
