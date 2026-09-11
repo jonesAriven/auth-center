@@ -171,12 +171,64 @@ public class SecurityConfig {
         return source;
     }
 
+    /**
+     * 统一用户管理接口的 CORS（Phase 6 · 用户管理改造）。
+     *
+     * <p>背景：6 个应用要共用同一份「用户管理面板」（公共组件 `UserManagementPanel`）。
+     * 其中 kb-web / kb-ops / infra-monitor / activecode 持有的本就是 auth-center 签发的
+     * OIDC access_token（`JwtAuthenticationFilter` 已支持按 `uid` claim 验签并加载
+     * `ROLE_ADMIN`），因此**无需各应用再写一遍后端代理**，直接跨域调 `/admin/users` 即可。
+     * portal 因为走 BFF（机密客户端换票），继续用自家的 `/portal/api/admin/users` 代理。
+     *
+     * <p>与 `ssoAuxCorsConfigurationSource` 的差别：
+     * <ul>
+     *   <li>方法要放开 <b>PUT / DELETE</b>（编辑、删除、重置密码）；</li>
+     *   <li>鉴权走 <b>Authorization: Bearer</b> 而非 Cookie，所以无需 credentials；</li>
+     *   <li>注册范围**只有 `/admin/**`**（绝不能写 "/**"，否则又会像 2026-09-11 那次
+     *       把同源表单 POST /login 判成非法 CORS 请求打成 403）。</li>
+     * </ul>
+     */
+    @Bean
+    public org.springframework.web.cors.CorsConfigurationSource adminApiCorsConfigurationSource() {
+        org.springframework.web.cors.CorsConfiguration config = new org.springframework.web.cors.CorsConfiguration();
+        config.setAllowedOrigins(java.util.List.of(
+                "https://auth.marschat.online",
+                // 6 个接入应用（Phase 6 范围）
+                "https://main.marschat.online",
+                "https://tools.marschat.online",
+                "https://kb.marschat.online",
+                "https://cosmic.marschat.online",
+                "https://monitor.marschat.online",
+                // 内网 / 局域网直连入口
+                "http://192.168.31.105",
+                "http://192.168.31.105:8310",
+                "http://192.168.31.105:18080",
+                "http://192.168.31.182:18080",
+                // 本地开发
+                "http://localhost:5173",
+                "http://localhost:3001",
+                "http://localhost:3002",
+                "http://localhost:8310"));
+        config.setAllowedMethods(java.util.List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        config.setAllowedHeaders(java.util.List.of("*"));
+        // Bearer token 鉴权，不依赖 Cookie → 不需要 credentials（也就避免了 "*" 的规范冲突）
+        config.setAllowCredentials(false);
+        config.setMaxAge(3600L);
+        org.springframework.web.cors.UrlBasedCorsConfigurationSource source =
+                new org.springframework.web.cors.UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/admin/**", config);
+        return source;
+    }
+
     /** 链3：原有 API（legacy 直登接口 + 业务接口），保持无状态 JWT 验签，行为不变 */
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
             .securityMatcher("/**")
             .csrf(AbstractHttpConfigurer::disable)
+            // Phase 6 · 用户管理改造：/admin/** 供各应用前端跨域直连（Bearer OIDC access_token）。
+            // 只对显式注册的 /admin/** 生效；其余路径 lookup 返回 null，CorsFilter 直接放行、不拦截。
+            .cors(cors -> cors.configurationSource(adminApiCorsConfigurationSource()))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/auth/login", "/auth/refresh").permitAll()
