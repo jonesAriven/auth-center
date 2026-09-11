@@ -31,9 +31,11 @@ steps:
       - sed -i 's/\r$//' scripts/deploy.sh
       - echo "=== [3/4] 产物直写最终目录 ==="
       # /mnt/shared（bind mount）上打 tar 会报 "file changed as we read it"（连写 /tmp 再搬都复现，
-      # 是挂载文件系统 stat 抖动），干脆放弃 tar.gz：产物 = 目录本身，deploy 直接执行
-      - rm -rf /mnt/shared/auth-center-build
+      # 是挂载文件系统 stat 抖动），干脆放弃 tar.gz：产物 = 目录本身，deploy 直接执行。
+      # ⚠️ 清理不能用 `rm -rf <目录>`：CIFS 上删非空目录会报 "Directory not empty" 并整体失败
+      #    （流水线 #6 实测），改用「逐项删除 + 兜底不阻断」，目录本身保留。
       - mkdir -p /mnt/shared/auth-center-build
+      - find /mnt/shared/auth-center-build -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
       - cp target/auth-center.jar Dockerfile scripts/deploy.sh /mnt/shared/auth-center-build/
       - sync
       - ls -lh /mnt/shared/auth-center-build
