@@ -101,11 +101,17 @@ public class SecurityConfig {
      * 浏览器看到 <title>Please sign in</title> 的裸表单）。改为静态 login.html（品牌 + 忘记密码入口），
      * 登录提交仍走 Spring Security 的 POST /login（UsernamePasswordAuthenticationFilter），不进 MVC。
      * 同批放行 /forgot-password.html —— 该页同时是 myfrp 登录页「忘记密码」历史死链指向的地址（L029）。
+     *
+     * 2026-09-11（Phase 6 紧密型接入）：新增放行 /auth/session（会话探针）与 /auth/slo（统一登出）。
+     * 这两个端点**必须挂在有会话的链上**——链3 是 STATELESS，SecurityContextHolder 恒空，
+     * 探针会永远返回未登录。同时本链开启 CORS（凭据模式），供各应用跨域 XHR 探针使用。
      */
     @Bean
     public SecurityFilterChain loginPageSecurityFilterChain(HttpSecurity http) throws Exception {
         http
-            .securityMatcher("/login", "/login.html", "/forgot-password.html", "/error")
+            .securityMatcher("/login", "/login.html", "/forgot-password.html", "/error",
+                    "/auth/session", "/auth/slo")
+            .cors(cors -> cors.configurationSource(ssoAuxCorsConfigurationSource()))
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
             .formLogin(form -> form
                     .loginPage("/login.html")
@@ -114,6 +120,42 @@ public class SecurityConfig {
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED))
             .csrf(AbstractHttpConfigurer::disable);
         return http.build();
+    }
+
+    /**
+     * 会话探针 / 统一登出的 CORS 配置（Phase 6）。
+     * <p>与 OIDC 端点那份的关键差别：<b>必须允许携带凭据</b>（浏览器要带上 auth-center 的 JSESSIONID，
+     * HttpOnly 只能由浏览器自动附带）。因此 {@code Allow-Origin} 必须回显具体原点，
+     * 不能用通配符 {@code *}（规范禁止二者共存）。
+     * <p>仅覆盖 *.marschat.online 各应用域 + 内网/LAN 直连入口 + 本地开发端口。
+     */
+    @Bean
+    public org.springframework.web.cors.CorsConfigurationSource ssoAuxCorsConfigurationSource() {
+        org.springframework.web.cors.CorsConfiguration config = new org.springframework.web.cors.CorsConfiguration();
+        config.setAllowedOrigins(java.util.List.of(
+                "https://main.marschat.online",
+                "https://kb.marschat.online",
+                "https://monitor.marschat.online",
+                "https://tools.marschat.online",
+                "https://frp.marschat.online",
+                "https://memory.marschat.online",
+                "https://tokenhub.marschat.online",
+                "http://192.168.31.105",
+                "http://192.168.31.105:8310",
+                "http://192.168.31.105:18080",
+                "http://192.168.31.182:18080",
+                "http://localhost:5173",
+                "http://localhost:3001",
+                "http://localhost:3002",
+                "http://localhost:8310"));
+        config.setAllowedMethods(java.util.List.of("GET", "POST", "OPTIONS"));
+        config.setAllowedHeaders(java.util.List.of("*"));
+        config.setAllowCredentials(true);
+        config.setMaxAge(3600L);
+        org.springframework.web.cors.UrlBasedCorsConfigurationSource source =
+                new org.springframework.web.cors.UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", config);
+        return source;
     }
 
     /** 链3：原有 API（legacy 直登接口 + 业务接口），保持无状态 JWT 验签，行为不变 */

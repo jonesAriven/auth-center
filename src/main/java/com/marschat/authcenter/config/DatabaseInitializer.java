@@ -417,9 +417,71 @@ public class DatabaseInitializer implements CommandLineRunner {
         seedInframonClient(repository);
             seedP2Clients(repository);
             seedAppClients(repository);
+            // Phase 6 紧密型接入：统一登出（SLO）回调白名单，全部已有客户端幂等补齐
+            ensurePostLogoutRedirectUris(repository);
         } catch (Exception e) {
             log.warn("种子 OIDC 客户端失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 统一登出（SLO）回调白名单 —— 幂等补齐（Phase 6 紧密型接入，2026-09-11）。
+     * <p>
+     * 背景：SAS 的 {@code /connect/logout} 要求 {@code post_logout_redirect_uri} 必须落在该客户端的
+     * 白名单内，否则直接 400（实测：9 个客户端原本全部为空 → 带该参数一律 400）。
+     * 本方法**独立于各 seedXxx 方法**遍历补齐，保证「历史已存在的客户端行」也被修正，
+     * 新增应用时只需在下面补一行 —— 不必去动各自的 seed 分支。
+     */
+    private void ensurePostLogoutRedirectUris(JdbcRegisteredClientRepository repository) {
+        java.util.Map<String, java.util.List<String>> required = new java.util.LinkedHashMap<>();
+        // 6 应用紧密型接入（本次范围）
+        required.put("marschat-portal", java.util.List.of(
+                "https://main.marschat.online/portal/login",
+                "http://192.168.31.105:8095/portal/login",
+                "http://localhost:5173/login"));
+        required.put("marschat-kbweb", java.util.List.of(
+                "https://kb.marschat.online/kb/login",
+                "http://192.168.31.105/kb/login",
+                "http://localhost:5173/kb/login"));
+        required.put("marschat-kbops", java.util.List.of(
+                "https://kb.marschat.online/ops/login",
+                "http://192.168.31.105/ops/login",
+                "http://localhost:3001/ops/login"));
+        required.put("marschat-inframon", java.util.List.of(
+                "https://monitor.marschat.online/infra/login",
+                "http://192.168.31.105/infra/login",
+                "http://localhost:3002/infra/login"));
+        required.put("marschat-activecode", java.util.List.of(
+                "https://tools.marschat.online/activecode/login.html",
+                "http://192.168.31.182:18080/activecode/login.html",
+                "http://192.168.31.105:18080/activecode/login.html"));
+        required.put("cosmic-studio", java.util.List.of(
+                "http://192.168.31.105:8310/login",
+                "http://localhost:5173/login",
+                "http://localhost:8310/login"));
+
+        required.forEach((clientId, uris) -> {
+            try {
+                RegisteredClient existing = repository.findByClientId(clientId);
+                if (existing == null) {
+                    log.warn("SLO 白名单补齐跳过：客户端 {} 未注册", clientId);
+                    return;
+                }
+                if (existing.getPostLogoutRedirectUris().containsAll(uris)) {
+                    return;
+                }
+                RegisteredClient updated = RegisteredClient.from(existing)
+                        .postLogoutRedirectUris(r -> {
+                            r.clear();
+                            r.addAll(uris);
+                        })
+                        .build();
+                repository.save(updated);
+                log.info("已补齐 {} 登出回调白名单: {}", clientId, uris);
+            } catch (Exception e) {
+                log.warn("补齐 {} 登出回调白名单失败: {}", clientId, e.getMessage());
+            }
+        });
     }
 
     /**
