@@ -456,6 +456,7 @@ public class DatabaseInitializer implements CommandLineRunner {
                 "http://192.168.31.182:18080/activecode/login.html",
                 "http://192.168.31.105:18080/activecode/login.html"));
         required.put("cosmic-studio", java.util.List.of(
+                "https://cosmic.marschat.online/login",
                 "http://192.168.31.105:8310/login",
                 "http://localhost:5173/login",
                 "http://localhost:8310/login"));
@@ -564,9 +565,10 @@ public class DatabaseInitializer implements CommandLineRunner {
                         "https://frp.marschat.online/sso-callback",
                         "http://192.168.31.105:18082/sso-callback",
                         "http://localhost:5173/sso-callback"));
-        // cosmic-studio（前端 SPA，容器 cosmic-web 宿主机 8310）
+        // cosmic-studio（前端 SPA，容器 cosmic-web 宿主机 8310；公网经 cosmic.marschat.online 直连容器端口）
         seedPublicClient(repository, "cosmic-studio", "MarsChat COSMIC Studio",
                 java.util.List.of(
+                        "https://cosmic.marschat.online/sso-callback",
                         "http://192.168.31.105:8310/sso-callback",
                         "http://localhost:5173/sso-callback",
                         "http://localhost:8310/sso-callback"));
