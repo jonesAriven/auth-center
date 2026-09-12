@@ -136,6 +136,74 @@ public class DatabaseInitializer implements CommandLineRunner {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户凭证表'
             """);
 
+        // ============ Phase 2 · RBAC 六表（unified-auth 方案 §3.2 权威 schema） ============
+        createTableIfNotExists("sys_role", """
+            CREATE TABLE IF NOT EXISTS sys_role (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                scope VARCHAR(16) NOT NULL DEFAULT 'platform' COMMENT 'platform=平台角色 | client=应用角色',
+                client_id VARCHAR(64) NULL COMMENT 'client 级角色归属的应用（platform 级为 NULL）',
+                code VARCHAR(64) NOT NULL COMMENT '角色标识',
+                name VARCHAR(64) NOT NULL COMMENT '显示名',
+                description VARCHAR(255) NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_scope_client_code (scope, client_id, code)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色表（平台/应用双层）'
+            """);
+        createTableIfNotExists("sys_permission", """
+            CREATE TABLE IF NOT EXISTS sys_permission (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                client_id VARCHAR(64) NOT NULL COMMENT '归属应用',
+                type VARCHAR(16) NOT NULL COMMENT 'menu|api|action（权限粒度=菜单+接口两级）',
+                code VARCHAR(128) NOT NULL COMMENT '权限点标识，如 dashboard / deployment:create',
+                name VARCHAR(128) NOT NULL,
+                parent_id BIGINT NULL COMMENT '菜单树自关联',
+                sort INT DEFAULT 0,
+                status TINYINT DEFAULT 1 COMMENT '1=有效 0=已失效（上报全量覆盖后消失的条目）',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_client_type_code (client_id, type, code),
+                INDEX idx_parent (parent_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='权限点表（菜单/接口）'
+            """);
+        createTableIfNotExists("sys_role_permission", """
+            CREATE TABLE IF NOT EXISTS sys_role_permission (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                role_id BIGINT NOT NULL,
+                permission_id BIGINT NOT NULL,
+                UNIQUE INDEX uk_role_perm (role_id, permission_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色-权限点绑定'
+            """);
+        createTableIfNotExists("sys_user_role", """
+            CREATE TABLE IF NOT EXISTS sys_user_role (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                role_id BIGINT NOT NULL,
+                client_id VARCHAR(64) NULL COMMENT '授权作用域（client 级记录应用；platform 级 NULL）',
+                granted_by BIGINT NULL COMMENT '授权人（审计）',
+                granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_user_role_scope (user_id, role_id, client_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户-角色绑定（谁在什么系统是什么角色）'
+            """);
+        createTableIfNotExists("sys_role_composite", """
+            CREATE TABLE IF NOT EXISTS sys_role_composite (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                parent_role_id BIGINT NOT NULL COMMENT '父角色（如应用管理员）',
+                child_role_id BIGINT NOT NULL COMMENT '子角色（如编辑者）',
+                UNIQUE INDEX uk_parent_child (parent_role_id, child_role_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色继承（父角色自动含子角色权限）'
+            """);
+        createTableIfNotExists("sys_app_client", """
+            CREATE TABLE IF NOT EXISTS sys_app_client (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                client_id VARCHAR(64) NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                status TINYINT DEFAULT 1 COMMENT '1=启用',
+                menu_registry_json MEDIUMTEXT NULL COMMENT '应用最近一次上报的菜单树原文（全量覆盖）',
+                last_sync_at DATETIME NULL COMMENT '最近上报时间',
+                UNIQUE INDEX uk_client (client_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用注册表（菜单上报元数据）'
+            """);
+
         // 存量库补列（幂等：information_schema 探明后执行，已存在则跳过）
         addColumnIfNotExists("user", "realm_id",
                 "ALTER TABLE user ADD COLUMN realm_id VARCHAR(50) DEFAULT 'kb' COMMENT '账号所属realm(账号池)'");
@@ -225,6 +293,7 @@ public class DatabaseInitializer implements CommandLineRunner {
 
         seedOidcClient();
         ensureAdminRole();
+        seedRbacBase();
 
         createTableIfNotExists("sys_error_log", """
             CREATE TABLE IF NOT EXISTS sys_error_log (
@@ -296,6 +365,52 @@ public class DatabaseInitializer implements CommandLineRunner {
             }
         } catch (Exception e) {
             log.warn("admin 角色引导失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * RBAC 基础种子（幂等，Phase 2）：
+     * ① 平台角色 admin/user（scope=platform，与既有 user.role 字段同语义）；
+     * ② 所有活跃 admin 绑定平台 admin 角色；活跃 user 绑定平台 user 角色；
+     * ③ sys_app_client 从 oauth2_registered_client 补齐应用注册条目。
+     * ⚠️ R10 默认策略：未配置权限点的应用 = 行为不变——本种子**不**建任何 sys_permission，
+     * 权限点由 Phase 4 菜单上报 / 接口注册产生。
+     */
+    private void seedRbacBase() {
+        try {
+            jdbcTemplate.update("""
+                INSERT INTO sys_role (scope, client_id, code, name, description)
+                SELECT 'platform', NULL, 'admin', '平台管理员', '全平台管理权限（含各应用管理接口）'
+                WHERE NOT EXISTS (SELECT 1 FROM sys_role WHERE scope='platform' AND code='admin')
+                """);
+            jdbcTemplate.update("""
+                INSERT INTO sys_role (scope, client_id, code, name, description)
+                SELECT 'platform', NULL, 'user', '普通用户', '平台基础权限'
+                WHERE NOT EXISTS (SELECT 1 FROM sys_role WHERE scope='platform' AND code='user')
+                """);
+            jdbcTemplate.update("""
+                INSERT INTO sys_user_role (user_id, role_id, client_id, granted_by)
+                SELECT u.id, r.id, NULL, NULL FROM user u
+                JOIN sys_role r ON r.scope='platform' AND r.code='admin'
+                WHERE u.role='admin' AND u.deleted=0
+                  AND NOT EXISTS (SELECT 1 FROM sys_user_role ur WHERE ur.user_id=u.id AND ur.role_id=r.id)
+                """);
+            jdbcTemplate.update("""
+                INSERT INTO sys_user_role (user_id, role_id, client_id, granted_by)
+                SELECT u.id, r.id, NULL, NULL FROM user u
+                JOIN sys_role r ON r.scope='platform' AND r.code='user'
+                WHERE u.role<>'admin' AND u.deleted=0
+                  AND NOT EXISTS (SELECT 1 FROM sys_user_role ur WHERE ur.user_id=u.id AND ur.role_id=r.id)
+                """);
+            jdbcTemplate.update("""
+                INSERT INTO sys_app_client (client_id, name, status)
+                SELECT c.client_id, COALESCE(c.client_name, c.client_id), 1
+                FROM oauth2_registered_client c
+                WHERE NOT EXISTS (SELECT 1 FROM sys_app_client a WHERE a.client_id=c.client_id)
+                """);
+            log.info("RBAC 基础种子完成（平台角色/绑定/应用注册表）");
+        } catch (Exception e) {
+            log.warn("RBAC 种子失败: {}", e.getMessage());
         }
     }
 

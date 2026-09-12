@@ -168,6 +168,8 @@ public class SecurityConfig {
         // "Invalid CORS request"，登录被彻底打死（2026-09-11 实测回归）。
         source.registerCorsConfiguration("/auth/session", config);
         source.registerCorsConfiguration("/auth/slo", config);
+        // Phase 2：权限下发端点（6 前端跨域直调，路由守卫/菜单渲染）
+        source.registerCorsConfiguration("/auth/permissions", config);
         return source;
     }
 
