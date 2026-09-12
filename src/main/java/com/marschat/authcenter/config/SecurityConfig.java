@@ -219,6 +219,8 @@ public class SecurityConfig {
         org.springframework.web.cors.UrlBasedCorsConfigurationSource source =
                 new org.springframework.web.cors.UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/admin/**", config);
+        // Phase 2：权限下发端点同在链 3（Bearer），6 前端跨域直调需要预检
+        source.registerCorsConfiguration("/auth/permissions", config);
         return source;
     }
 
