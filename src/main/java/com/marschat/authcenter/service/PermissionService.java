@@ -308,4 +308,80 @@ public class PermissionService {
             return null;
         }
     }
+
+    // ───────────────────────── 授权管理（Phase 4 · 角色 × 权限点） ─────────────────────────
+
+    /** 角色列表（platform + client 级，授权界面左栏）。 */
+    public List<Map<String, Object>> listRoles() {
+        try {
+            return jdbcTemplate.queryForList("""
+                    SELECT id, scope, client_id, code, name, description
+                    FROM sys_role ORDER BY scope, client_id, code
+                    """);
+        } catch (Exception e) {
+            log.warn("列角色失败: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /** 应用权限点明细（含失效条目，授权界面右栏树）。 */
+    public List<Map<String, Object>> listPermissions(String clientId) {
+        try {
+            return jdbcTemplate.queryForList("""
+                    SELECT id, type, code, name, parent_id, sort, status
+                    FROM sys_permission WHERE client_id=? ORDER BY type, sort, id
+                    """, clientId);
+        } catch (Exception e) {
+            log.warn("列权限点失败: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /** 角色已绑权限全码集合（client:type:code，授权界面回显）。 */
+    public Set<String> rolePermissionCodes(long roleId) {
+        try {
+            return new HashSet<>(jdbcTemplate.queryForList("""
+                    SELECT p.client_id || ':' || p.type || ':' || p.code
+                    FROM sys_role_permission rp JOIN sys_permission p ON p.id = rp.permission_id
+                    WHERE rp.role_id=?
+                    """, String.class, roleId));
+        } catch (Exception e) {
+            log.warn("查角色已绑权限失败: {}", e.getMessage());
+            return new HashSet<>();
+        }
+    }
+
+    /**
+     * 角色授权全量覆盖：codes 形如 {@code marschat-kbops:menu:hosts}（全码）。
+     * 未知 code 严格报错（授权界面只从权限树勾选，出现未知码=调用方错误）。
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public int assignRolePermissions(long roleId, Set<String> codes) {
+        Integer exists = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM sys_role WHERE id=?", Integer.class, roleId);
+        if (exists == null || exists == 0) {
+            throw new IllegalArgumentException("角色不存在: " + roleId);
+        }
+        List<Long> permIds = new ArrayList<>();
+        for (String full : codes) {
+            String[] parts = full.split(":", 3);
+            if (parts.length != 3) {
+                throw new IllegalArgumentException("权限码格式非法（应为 client:type:code）: " + full);
+            }
+            List<Long> ids = jdbcTemplate.query(
+                    "SELECT id FROM sys_permission WHERE client_id=? AND type=? AND code=? AND status=1",
+                    (rs, i) -> rs.getLong(1), parts[0], parts[1], parts[2]);
+            if (ids.isEmpty()) {
+                throw new IllegalArgumentException("权限点不存在或已失效: " + full);
+            }
+            permIds.add(ids.get(0));
+        }
+        jdbcTemplate.update("DELETE FROM sys_role_permission WHERE role_id=?", roleId);
+        for (Long pid : permIds) {
+            jdbcTemplate.update(
+                    "INSERT INTO sys_role_permission (role_id, permission_id) VALUES (?, ?)", roleId, pid);
+        }
+        log.info("角色授权完成: roleId={} bound={}", roleId, permIds.size());
+        return permIds.size();
+    }
 }
