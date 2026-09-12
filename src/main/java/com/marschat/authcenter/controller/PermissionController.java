@@ -27,11 +27,18 @@ public class PermissionController {
     @GetMapping("/permissions")
     public Result<Map<String, Object>> permissions(@RequestParam(name = "client") String client,
                                                    jakarta.servlet.http.HttpServletRequest request) {
-        Object uidAttr = request.getAttribute("userId");
-        if (uidAttr == null) {
+        // 身份来自 JwtAuthenticationFilter 设置的 SecurityContext；
+        // UserDetailsServiceImpl 把 principal.username 写成 user.id，即 auth uid
+        var auth = org.springframework.security.core.context.SecurityContextHolder.getContext().getAuthentication();
+        if (auth == null || !(auth.getPrincipal() instanceof org.springframework.security.core.userdetails.UserDetails ud)) {
             return Result.fail(401, "未认证");
         }
-        long userId = Long.parseLong(String.valueOf(uidAttr));
+        long userId;
+        try {
+            userId = Long.parseLong(ud.getUsername());
+        } catch (NumberFormatException e) {
+            return Result.fail(401, "未认证");
+        }
         return Result.ok(permissionService.computeForUser(userId, client));
     }
 }
