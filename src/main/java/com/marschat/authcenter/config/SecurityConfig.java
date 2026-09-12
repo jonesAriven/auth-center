@@ -265,6 +265,25 @@ public class SecurityConfig {
         return http.build();
     }
 
+    /**
+     * 链5：应用间内部端点（Phase 4 P-B，菜单上报直连通道）。
+     * 放行 JWT 验签（应用侧无用户会话），应用身份由 InternalAppClientController 的
+     * X-Client-Secret 常量时间比对承担；secret 未配置（NULL）的应用一律 403。
+     */
+    @Bean
+    @Order(2)
+    public SecurityFilterChain internalClientsSecurityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .securityMatcher("/internal/**")
+            .csrf(AbstractHttpConfigurer::disable)
+            .cors(cors -> cors.configurationSource(adminApiCorsConfigurationSource()))
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+                .anyRequest().permitAll());
+        return http.build();
+    }
+
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();

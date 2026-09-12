@@ -13,7 +13,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -187,6 +186,9 @@ public class PermissionService {
      * <p>应用上报 menu-registry.yml 原文；中心解析后 upsert {@code sys_permission(type=menu)}，
      * 上报中不存在的既有菜单条目标记 status=0（识别"已删除的菜单"），原文存
      * {@code sys_app_client.menu_registry_json}。返回 {upserted, retired} 计数。
+     *
+     * <p>树结构支持 {@code children} 嵌套（推荐，分组节点含子项）与扁平 {@code parent} 字段
+     * （兼容既有上报方）；两者并存时树结构优先。§18.10 实测：旧实现只读顶层、children 子项全丢。
      */
     @SuppressWarnings("unchecked")
     public Map<String, Integer> reportMenus(String clientId, String menusYaml) {
@@ -200,34 +202,23 @@ public class PermissionService {
                 }
             }
         }
-        int upserted = 0;
-        for (Map<String, Object> m : menus) {
-            String key = String.valueOf(m.get("key"));
-            String title = String.valueOf(m.getOrDefault("title", key));
-            String parent = m.get("parent") == null || String.valueOf(m.get("parent")).isBlank()
-                    ? null : String.valueOf(m.get("parent"));
-            int sort = m.get("order") == null ? 0 : Integer.parseInt(String.valueOf(m.get("order")));
-            Long parentId = parent == null ? null : findMenuIdByCode(clientId, parent);
-            jdbcTemplate.update("""
-                    INSERT INTO sys_permission (client_id, type, code, name, parent_id, sort, status)
-                    VALUES (?, 'menu', ?, ?, ?, ?, 1)
-                    ON DUPLICATE KEY UPDATE name=VALUES(name), parent_id=VALUES(parent_id),
-                                            sort=VALUES(sort), status=1
-                    """, clientId, key, title, parentId, sort);
-            upserted++;
+        List<String> collectedKeys = new ArrayList<>();
+        int upserted = upsertMenuTree(clientId, menus, null, collectedKeys);
+        // 全量覆盖：本次上报未包含的既有菜单 → 失效（参数化 NOT IN，空上报=全部下线）
+        int retired;
+        if (collectedKeys.isEmpty()) {
+            retired = jdbcTemplate.update(
+                    "UPDATE sys_permission SET status=0 WHERE client_id=? AND type='menu' AND status=1",
+                    clientId);
+        } else {
+            String placeholders = String.join(",", java.util.Collections.nCopies(collectedKeys.size(), "?"));
+            Object[] params = Stream.concat(Stream.of(clientId), collectedKeys.stream()).toArray();
+            retired = jdbcTemplate.update(
+                    ("UPDATE sys_permission SET status=0 "
+                            + "WHERE client_id=? AND type='menu' AND status=1 AND code NOT IN (%s)")
+                            .formatted(placeholders),
+                    params);
         }
-        // 全量覆盖：本次上报未包含的既有菜单 → 失效（子查询自连接避免同表 UPDATE/SELECT 冲突）
-        int retired = jdbcTemplate.update("""
-                UPDATE sys_permission p
-                LEFT JOIN sys_permission keep_p
-                  ON keep_p.id = p.id AND keep_p.status = 1
-                SET p.status = 0
-                WHERE p.client_id=? AND p.type='menu' AND p.status=1
-                  AND p.code NOT IN (%s)
-                """.formatted(menus.isEmpty() ? "''" : menus.stream()
-                        .map(m -> "'" + String.valueOf(m.get("key")).replace("'", "''") + "'")
-                        .collect(Collectors.joining(","))),
-                clientId);
         jdbcTemplate.update("""
                 INSERT INTO sys_app_client (client_id, name, status, menu_registry_json, last_sync_at)
                 VALUES (?, ?, 1, ?, NOW())
@@ -235,6 +226,64 @@ public class PermissionService {
                 """, clientId, clientId, menusYaml);
         log.info("菜单上报完成: {} upsert={} retired={}", clientId, upserted, retired);
         return Map.of("upserted", upserted, "retired", retired);
+    }
+
+    /** 递归 upsert 菜单树：parentId 为树结构父亲；条目自带 parent 字段仅在无树父亲时生效。 */
+    @SuppressWarnings("unchecked")
+    private int upsertMenuTree(String clientId, List<Map<String, Object>> items,
+                               Long parentId, List<String> collectedKeys) {
+        int count = 0;
+        for (Map<String, Object> m : items) {
+            String key = String.valueOf(m.get("key"));
+            if (key == null || key.isBlank() || "null".equals(key)) {
+                continue;
+            }
+            String title = String.valueOf(m.getOrDefault("title", key));
+            Long effParent = parentId;
+            if (effParent == null && m.get("parent") != null && !String.valueOf(m.get("parent")).isBlank()) {
+                effParent = findMenuIdByCode(clientId, String.valueOf(m.get("parent")));
+            }
+            int sort = m.get("order") == null ? 0 : Integer.parseInt(String.valueOf(m.get("order")));
+            jdbcTemplate.update("""
+                    INSERT INTO sys_permission (client_id, type, code, name, parent_id, sort, status)
+                    VALUES (?, 'menu', ?, ?, ?, ?, 1)
+                    ON DUPLICATE KEY UPDATE name=VALUES(name), parent_id=VALUES(parent_id),
+                                            sort=VALUES(sort), status=1
+                    """, clientId, key, title, effParent, sort);
+            collectedKeys.add(key);
+            count++;
+            if (m.get("children") instanceof List<?> kids && !kids.isEmpty()) {
+                List<Map<String, Object>> childItems = new ArrayList<>();
+                for (Object k : kids) {
+                    if (k instanceof Map<?, ?> km) {
+                        childItems.add((Map<String, Object>) km);
+                    }
+                }
+                count += upsertMenuTree(clientId, childItems, findMenuIdByCode(clientId, key), collectedKeys);
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 校验应用上报凭据（{@code PUT /internal/clients/{clientId}/menus} 的 X-Client-Secret）。
+     * {@code sys_app_client.client_secret} 为 NULL/空 = 该应用未启用 internal 上报通道，一律拒绝。
+     */
+    public boolean verifyClientSecret(String clientId, String secret) {
+        try {
+            List<String> rows = jdbcTemplate.query(
+                    "SELECT client_secret FROM sys_app_client WHERE client_id=?",
+                    (rs, i) -> rs.getString(1), clientId);
+            if (rows.isEmpty() || rows.get(0) == null || rows.get(0).isBlank()) {
+                return false;
+            }
+            return java.security.MessageDigest.isEqual(
+                    rows.get(0).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    secret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            log.warn("校验应用上报凭据失败: {}", e.getMessage());
+            return false;
+        }
     }
 
     private Long findMenuIdByCode(String clientId, String code) {

@@ -200,6 +200,7 @@ public class DatabaseInitializer implements CommandLineRunner {
                 status TINYINT DEFAULT 1 COMMENT '1=启用',
                 menu_registry_json MEDIUMTEXT NULL COMMENT '应用最近一次上报的菜单树原文（全量覆盖）',
                 last_sync_at DATETIME NULL COMMENT '最近上报时间',
+                client_secret VARCHAR(128) NULL COMMENT '应用上报凭据(X-Client-Secret)；NULL=未启用internal上报',
                 UNIQUE INDEX uk_client (client_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用注册表（菜单上报元数据）'
             """);
@@ -220,6 +221,9 @@ public class DatabaseInitializer implements CommandLineRunner {
                 "ALTER TABLE user MODIFY COLUMN email VARCHAR(128) COMMENT '邮箱'");
         addColumnIfNotExists("oauth2_registered_client", "client_secret_expires_at",
                 "ALTER TABLE oauth2_registered_client ADD COLUMN client_secret_expires_at TIMESTAMP DEFAULT NULL");
+        // Phase 4 P-B：应用菜单上报凭据（X-Client-Secret）；NULL=该应用未启用 internal 上报通道
+        addColumnIfNotExists("sys_app_client", "client_secret",
+                "ALTER TABLE sys_app_client ADD COLUMN client_secret VARCHAR(128) NULL COMMENT '应用上报凭据(X-Client-Secret)；NULL=未启用internal上报'");
 
         // 存量数据迁移：user.email/phone/wechat_openid -> user_identity（幂等，可重复执行）
         migrateUserIdentities();
