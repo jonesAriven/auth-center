@@ -78,7 +78,9 @@ public class ClientsYmlLoader implements ApplicationRunner {
                 String clientId = String.valueOf(c.get("client-id"));
                 String type = String.valueOf(c.getOrDefault("type", "public"));
                 List<String> redirects = (List<String>) c.get("redirect-uris");
-                List<String> postLogouts = (List<String>) c.getOrDefault("post-logout-redirect-uris", List.of());
+                // yml 中 key 存在但值为空（`key:` 无值）时 snakeyaml 解析为 null——getOrDefault 不生效
+                List<String> postLogouts = c.get("post-logout-redirect-uris") instanceof List<?> pl
+                        ? (List<String>) pl : List.of();
 
                 RegisteredClient existing = repository.findByClientId(clientId);
                 if (existing == null) {

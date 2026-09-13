@@ -101,6 +101,7 @@ clients:
       - http://localhost:5173/sso-callback
       - http://localhost:8310/sso-callback
     post-logout-redirect-uris:
+      []
   - client-id: marschat-memory
     name: MarsChat Memory Extract Panel
     type: public
@@ -114,6 +115,7 @@ clients:
       - https://memory.marschat.online/sso-callback
       - http://192.168.31.105:8720/sso-callback
     post-logout-redirect-uris:
+      []
   - client-id: marschat-tokenhub
     name: MarsChat TokenHub
     type: public
@@ -127,6 +129,7 @@ clients:
       - https://tokenhub.marschat.online/api/admin/auth/oauth/callback
       - http://192.168.31.105:13000/api/admin/auth/oauth/callback
     post-logout-redirect-uris:
+      []
   - client-id: frp-manager
     name: MarsChat FRP Manager
     type: public
@@ -141,6 +144,7 @@ clients:
       - http://192.168.31.105:18082/sso-callback
       - http://localhost:5173/sso-callback
     post-logout-redirect-uris:
+      []
   - client-id: p3-probe-client
     name: Phase3 Onboarding Probe
     type: public
@@ -154,3 +158,4 @@ clients:
       - https://p3-probe.marschat.online/sso-callback
       - http://localhost:5173/sso-callback
     post-logout-redirect-uris:
+      []
