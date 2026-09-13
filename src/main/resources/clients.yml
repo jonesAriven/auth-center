@@ -74,6 +74,7 @@ clients:
   - client-id: marschat-activecode
     name: MarsChat ActiveCode (SPA)
     type: public
+    menu-report-secret: ${ACTIVECODE_MENU_REPORT_SECRET:b2ad6222f50d9f5d9000c3c9abe7ef6242494e9b5b988172}
     scopes: ["openid", "profile"]
     grant-types: ["authorization_code", "refresh_token"]
     access-token-ttl-minutes: 30
