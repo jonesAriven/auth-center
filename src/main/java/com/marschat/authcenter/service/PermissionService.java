@@ -437,8 +437,9 @@ public class PermissionService {
     /** 用户在某应用的菜单覆盖排除码集合（全码 client:menu:code，回显用）。 */
     public Set<String> userMenuOverrideCodes(long userId, String clientId) {
         try {
+            // ⚠️ MySQL 默认模式下 || 是逻辑或不是拼接——必须用 CONCAT()
             return new java.util.HashSet<>(jdbcTemplate.queryForList(
-                    "SELECT p.client_id || ':' || p.type || ':' || p.code "
+                    "SELECT CONCAT(p.client_id, ':', p.type, ':', p.code) "
                     + "FROM sys_user_menu_override o JOIN sys_permission p ON p.id = o.permission_id "
                     + "WHERE o.user_id=? AND o.action='deny' AND p.client_id=? AND p.type='menu'",
                     String.class, userId, clientId));
