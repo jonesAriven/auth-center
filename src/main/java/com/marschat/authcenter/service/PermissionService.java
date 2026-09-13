@@ -25,10 +25,14 @@ import java.util.stream.Stream;
  *   平台角色 = user.role（存量字段） ∪ sys_user_role(platform 级绑定)
  *   应用角色 = sys_user_role(client 级绑定) → sys_role_composite 递归展开子角色
  *   权限点   = 上述角色 → sys_role_permission → sys_permission(status=1, client=本应用)
- *   configured = 该应用在 sys_permission 里是否存在任何记录
+ *   configured = 该应用是否存在至少一条「角色→权限」绑定（sys_role_permission ⋈ sys_permission）
  * </pre>
  * <b>R10 默认策略</b>：configured=false 时调用方（前端守卫 / 拦截器）按「行为不变」放行，
  * 保证存量应用零波及。
+ * <p>⚠️「已上报菜单定义」≠「已配置授权」：菜单上报只往 sys_permission 写权限点定义（0 条
+ * 角色绑定），若以「有权限点记录」判 configured，会让刚接入上报的应用对非超管立即锁死。
+ * 故 configured 以「真的存在角色→权限绑定」为准——上报与授权解耦，漏配授权不锁死；
+ * 一旦配了第一条绑定即刻接管过滤。
  */
 @Slf4j
 @Service
@@ -188,10 +192,18 @@ public class PermissionService {
         return out;
     }
 
+    /**
+     * 该应用是否「已配置授权」：存在至少一条「角色→权限」绑定
+     * （{@code sys_role_permission ⋈ sys_permission}，按本 client 过滤）。
+     * <p>⚠️ 判据是「有角色绑定」而非「有权限点记录」——菜单上报只写 sys_permission 定义
+     * （0 条角色绑定），若以「有记录」判定，刚接入上报的应用会对非超管立即过滤锁死
+     * （「已上报菜单定义」≠「已配置授权」）。解耦后：漏配授权不锁死，配了第一条绑定即接管。
+     */
     private boolean permissionConfigured(String clientId) {
         try {
             Integer n = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM sys_permission WHERE client_id=?", Integer.class, clientId);
+                    "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_permission p ON p.id=rp.permission_id WHERE p.client_id=?",
+                    Integer.class, clientId);
             return n != null && n > 0;
         } catch (Exception e) {
             return false;
