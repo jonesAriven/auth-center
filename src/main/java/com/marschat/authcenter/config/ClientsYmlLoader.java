@@ -103,7 +103,7 @@ public class ClientsYmlLoader implements ApplicationRunner {
                                     .build());
                     if ("confidential".equals(type)) {
                         b.clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
-                                .clientSecret(passwordEncoder.encode(String.valueOf(c.get("secret"))));
+                                .clientSecret(passwordEncoder.encode(resolveSecret(String.valueOf(c.get("secret")))));
                     } else {
                         b.clientAuthenticationMethod(ClientAuthenticationMethod.NONE);
                     }
@@ -153,6 +153,22 @@ public class ClientsYmlLoader implements ApplicationRunner {
 
     private static boolean Bool(Object v, boolean dflt) {
         return v == null ? dflt : Boolean.parseBoolean(String.valueOf(v));
+    }
+
+    /**
+     * secret 外置占位解析（Phase 3）：支持 {@code ${ENV_VAR:default}} 格式——
+     * 环境变量存在用环境值，否则用 yml 内默认。普通明文原样返回（向后兼容）。
+     */
+    private static String resolveSecret(String raw) {
+        if (raw != null && raw.startsWith("${") && raw.endsWith("}")) {
+            String body = raw.substring(2, raw.length() - 1);
+            int sep = body.indexOf(':');
+            String envKey = sep > 0 ? body.substring(0, sep) : body;
+            String dflt = sep > 0 ? body.substring(sep + 1) : "";
+            String env = System.getenv(envKey);
+            return env != null && !env.isBlank() ? env : dflt;
+        }
+        return raw;
     }
 
     private static String cSafe(String s) {

@@ -3,7 +3,7 @@ clients:
   - client-id: marschat-portal
     name: MarsChat Portal
     type: confidential
-    secret: portal-secret-2026
+    secret: ${PORTAL_CLIENT_SECRET:portal-secret-2026}
     scopes: ["openid", "profile"]
     grant-types: ["authorization_code", "refresh_token"]
     access-token-ttl-minutes: 30
