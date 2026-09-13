@@ -207,33 +207,63 @@ public class PermissionService {
      *
      * <p>树结构支持 {@code children} 嵌套（推荐，分组节点含子项）与扁平 {@code parent} 字段
      * （兼容既有上报方）；两者并存时树结构优先。§18.10 实测：旧实现只读顶层、children 子项全丢。
+     *
+     * <p>Phase 4 扩展（api 粒度）：yml 支持 {@code apis:} 平铺段（key/title），
+     * 注册为 {@code type=api} 权限点（@RequirePermission("api:<key>") 消费）；
+     * retired 全量覆盖覆盖 menu+api 两类。
      */
     @SuppressWarnings("unchecked")
     public Map<String, Integer> reportMenus(String clientId, String menusYaml) {
         org.yaml.snakeyaml.Yaml yaml = new org.yaml.snakeyaml.Yaml();
         Object root = yaml.load(menusYaml);
         List<Map<String, Object>> menus = new ArrayList<>();
-        if (root instanceof Map<?, ?> m && m.get("menus") instanceof List<?> l) {
-            for (Object o : l) {
-                if (o instanceof Map<?, ?> item) {
-                    menus.add((Map<String, Object>) item);
+        List<Map<String, Object>> apis = new ArrayList<>();
+        if (root instanceof Map<?, ?> m) {
+            if (m.get("menus") instanceof List<?> l) {
+                for (Object o : l) {
+                    if (o instanceof Map<?, ?> item) {
+                        menus.add((Map<String, Object>) item);
+                    }
+                }
+            }
+            if (m.get("apis") instanceof List<?> l) {
+                for (Object o : l) {
+                    if (o instanceof Map<?, ?> item) {
+                        apis.add((Map<String, Object>) item);
+                    }
                 }
             }
         }
+        // collectedKeys 形如 "menu:hosts" / "api:hosts:create"（type:code，全量覆盖判定用）
         List<String> collectedKeys = new ArrayList<>();
         int upserted = upsertMenuTree(clientId, menus, null, collectedKeys);
-        // 全量覆盖：本次上报未包含的既有菜单 → 失效（参数化 NOT IN，空上报=全部下线）
+        for (Map<String, Object> a : apis) {
+            String key = String.valueOf(a.get("key"));
+            if (key == null || key.isBlank() || "null".equals(key)) {
+                continue;
+            }
+            String title = String.valueOf(a.getOrDefault("title", key));
+            jdbcTemplate.update("""
+                    INSERT INTO sys_permission (client_id, type, code, name, parent_id, sort, status)
+                    VALUES (?, 'api', ?, ?, NULL, 0, 1)
+                    ON DUPLICATE KEY UPDATE name=VALUES(name), status=1
+                    """, clientId, key, title);
+            collectedKeys.add("api:" + key);
+            upserted++;
+        }
+        // 全量覆盖：本次上报未包含的既有 menu/api 条目 → 失效（参数化，空上报=全部下线）
         int retired;
         if (collectedKeys.isEmpty()) {
             retired = jdbcTemplate.update(
-                    "UPDATE sys_permission SET status=0 WHERE client_id=? AND type='menu' AND status=1",
+                    "UPDATE sys_permission SET status=0 WHERE client_id=? AND type IN ('menu','api') AND status=1",
                     clientId);
         } else {
             String placeholders = String.join(",", java.util.Collections.nCopies(collectedKeys.size(), "?"));
             Object[] params = Stream.concat(Stream.of(clientId), collectedKeys.stream()).toArray();
             retired = jdbcTemplate.update(
                     ("UPDATE sys_permission SET status=0 "
-                            + "WHERE client_id=? AND type='menu' AND status=1 AND code NOT IN (%s)")
+                            + "WHERE client_id=? AND type IN ('menu','api') AND status=1 "
+                            + "AND CONCAT(type, ':', code) NOT IN (%s)")
                             .formatted(placeholders),
                     params);
         }
@@ -268,7 +298,7 @@ public class PermissionService {
                     ON DUPLICATE KEY UPDATE name=VALUES(name), parent_id=VALUES(parent_id),
                                             sort=VALUES(sort), status=1
                     """, clientId, key, title, effParent, sort);
-            collectedKeys.add(key);
+            collectedKeys.add("menu:" + key);
             count++;
             if (m.get("children") instanceof List<?> kids && !kids.isEmpty()) {
                 List<Map<String, Object>> childItems = new ArrayList<>();
