@@ -173,6 +173,17 @@ public class DatabaseInitializer implements CommandLineRunner {
                 UNIQUE INDEX uk_role_perm (role_id, permission_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='角色-权限点绑定'
             """);
+        createTableIfNotExists("sys_user_menu_override", """
+            CREATE TABLE IF NOT EXISTS sys_user_menu_override (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                permission_id BIGINT NOT NULL,
+                action VARCHAR(8) DEFAULT 'deny' COMMENT 'deny=从角色权限中扣除（白名单减法，只能减不能加）',
+                granted_by BIGINT NULL COMMENT '授权人（审计）',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_user_perm (user_id, permission_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户级菜单覆盖（R9：角色默认+用户减法）'
+            """);
         createTableIfNotExists("sys_user_role", """
             CREATE TABLE IF NOT EXISTS sys_user_role (
                 id BIGINT AUTO_INCREMENT PRIMARY KEY,

@@ -99,6 +99,29 @@ public class AdminRoleController {
         }
     }
 
+    // ───────────── 用户级菜单减法（R9：角色默认 + 用户 override 只减不加） ─────────────
+
+    /** 用户在某应用的菜单覆盖排除码集合（全码）。 */
+    @GetMapping("/users/{userId}/menu-overrides")
+    public Result<?> userMenuOverrideCodes(@PathVariable long userId, @RequestParam String client) {
+        return Result.ok(permissionService.userMenuOverrideCodes(userId, client));
+    }
+
+    /** 用户菜单覆盖全量覆盖。body: {"codes": ["marschat-kbops:menu:ports", ...]}（从角色权限中扣除）。 */
+    @PutMapping("/users/{userId}/menu-overrides")
+    public Result<?> assignUserMenuOverrides(@PathVariable long userId, @RequestParam String client,
+                                             @RequestBody AssignRequest body) {
+        if (body == null || body.getCodes() == null) {
+            return Result.fail(400, "缺少 codes");
+        }
+        try {
+            return Result.ok(Map.of("denied",
+                    permissionService.assignUserMenuOverrides(userId, client, body.getCodes())));
+        } catch (IllegalArgumentException e) {
+            return Result.fail(400, e.getMessage());
+        }
+    }
+
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
     }

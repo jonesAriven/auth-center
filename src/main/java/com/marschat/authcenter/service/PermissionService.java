@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -51,6 +52,8 @@ public class PermissionService {
 
         Set<String> permissions = permissionsFor(clientId, roleIds);
         boolean configured = permissionConfigured(clientId);
+        // R9 用户级减法：角色默认权限 − 用户 override（deny）——只减不加
+        permissions.removeAll(deniedMenuCodes(userId, clientId));
 
         Map<String, Object> out = new HashMap<>();
         out.put("client", clientId);
@@ -59,6 +62,21 @@ public class PermissionService {
         out.put("permissions", List.copyOf(permissions));
         out.put("configured", configured);
         return out;
+    }
+
+    /** 用户在某应用的 menu 覆盖排除集（下发的全码形式）。 */
+    private Set<String> deniedMenuCodes(long userId, String clientId) {
+        try {
+            List<String> rows = jdbcTemplate.query(
+                    "SELECT p.type, p.code FROM sys_user_menu_override o "
+                    + "JOIN sys_permission p ON p.id = o.permission_id "
+                    + "WHERE o.user_id=? AND o.action='deny' AND p.client_id=? AND p.type='menu'",
+                    (rs, i) -> rs.getString(1) + ":" + rs.getString(2), userId, clientId);
+            return rows.stream().map(r -> clientId + ":" + r).collect(Collectors.toSet());
+        } catch (Exception e) {
+            log.debug("读用户菜单覆盖失败: {}", e.getMessage());
+            return new HashSet<>();
+        }
     }
 
     /** 平台角色：存量 user.role 字段 + sys_user_role 的 platform 级绑定。 */
@@ -414,6 +432,49 @@ public class PermissionService {
             log.warn("查用户应用角色失败: {}", e.getMessage());
             return new java.util.HashSet<>();
         }
+    }
+
+    /** 用户在某应用的菜单覆盖排除码集合（全码 client:menu:code，回显用）。 */
+    public Set<String> userMenuOverrideCodes(long userId, String clientId) {
+        try {
+            return new java.util.HashSet<>(jdbcTemplate.queryForList(
+                    "SELECT p.client_id || ':' || p.type || ':' || p.code "
+                    + "FROM sys_user_menu_override o JOIN sys_permission p ON p.id = o.permission_id "
+                    + "WHERE o.user_id=? AND o.action='deny' AND p.client_id=? AND p.type='menu'",
+                    String.class, userId, clientId));
+        } catch (Exception e) {
+            log.warn("查用户菜单覆盖失败: {}", e.getMessage());
+            return new java.util.HashSet<>();
+        }
+    }
+
+    /** 用户菜单覆盖全量覆盖（deny 集；权限码须为本应用有效 menu 权限点）。 */
+    @org.springframework.transaction.annotation.Transactional
+    public int assignUserMenuOverrides(long userId, String clientId, Set<String> codes) {
+        List<Long> permIds = new ArrayList<>();
+        for (String full : codes) {
+            String[] parts = full.split(":", 3);
+            if (parts.length != 3 || !"menu".equals(parts[1])) {
+                throw new IllegalArgumentException("覆盖码必须为本应用 menu 权限点全码: " + full);
+            }
+            List<Long> ids = jdbcTemplate.query(
+                    "SELECT id FROM sys_permission WHERE client_id=? AND type='menu' AND code=? AND status=1",
+                    (rs, i) -> rs.getLong(1), parts[0], parts[2]);
+            if (ids.isEmpty()) {
+                throw new IllegalArgumentException("权限点不存在或已失效: " + full);
+            }
+            permIds.add(ids.get(0));
+        }
+        jdbcTemplate.update(
+                "DELETE o FROM sys_user_menu_override o JOIN sys_permission p ON p.id = o.permission_id "
+                + "WHERE o.user_id=? AND p.client_id=? AND p.type='menu'", userId, clientId);
+        for (Long pid : permIds) {
+            jdbcTemplate.update(
+                    "INSERT INTO sys_user_menu_override (user_id, permission_id, action) VALUES (?, ?, 'deny')",
+                    userId, pid);
+        }
+        log.info("用户菜单覆盖完成: user={} client={} denied={}", userId, clientId, permIds.size());
+        return permIds.size();
     }
 
     /**
