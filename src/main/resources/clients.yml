@@ -141,3 +141,16 @@ clients:
       - http://192.168.31.105:18082/sso-callback
       - http://localhost:5173/sso-callback
     post-logout-redirect-uris:
+  - client-id: p3-probe-client
+    name: Phase3 Onboarding Probe
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://p3-probe.marschat.online/sso-callback
+      - http://localhost:5173/sso-callback
+    post-logout-redirect-uris:
