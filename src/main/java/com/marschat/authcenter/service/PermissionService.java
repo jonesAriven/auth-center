@@ -384,4 +384,60 @@ public class PermissionService {
         log.info("角色授权完成: roleId={} bound={}", roleId, permIds.size());
         return permIds.size();
     }
+
+    // ───────────────────── 应用角色与用户绑定（Phase 4 双视角·用户×系统） ─────────────────────
+
+    /** 创建应用级角色（client scope）。code 同 client 内唯一。 */
+    @org.springframework.transaction.annotation.Transactional
+    public long createClientRole(String clientId, String code, String name, String description) {
+        Long dup = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM sys_role WHERE scope='client' AND client_id=? AND code=?",
+                Long.class, clientId, code);
+        if (dup != null && dup > 0) {
+            throw new IllegalArgumentException("应用角色 code 已存在: " + code);
+        }
+        jdbcTemplate.update(
+                "INSERT INTO sys_role (scope, client_id, code, name, description) VALUES ('client', ?, ?, ?, ?)",
+                clientId, code, name, description);
+        return jdbcTemplate.queryForObject(
+                "SELECT id FROM sys_role WHERE scope='client' AND client_id=? AND code=?",
+                Long.class, clientId, code);
+    }
+
+    /** 用户在某应用的角色绑定 id 集合（sys_user_role）。 */
+    public Set<Long> userClientRoleIds(long userId, String clientId) {
+        try {
+            return new java.util.HashSet<>(jdbcTemplate.queryForList(
+                    "SELECT ur.role_id FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                    + "WHERE ur.user_id=? AND ur.client_id=?", Long.class, userId, clientId));
+        } catch (Exception e) {
+            log.warn("查用户应用角色失败: {}", e.getMessage());
+            return new java.util.HashSet<>();
+        }
+    }
+
+    /**
+     * 用户在某应用的角色绑定全量覆盖（Platform 级 user.role 不受影响；
+     * 超管判定走 user.role/平台角色，此处只管 client 级绑定）。
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public int assignUserClientRoles(long userId, String clientId, Set<Long> roleIds) {
+        for (Long rid : roleIds) {
+            Map<String, Object> r = jdbcTemplate.queryForMap(
+                    "SELECT scope, client_id FROM sys_role WHERE id=?", rid);
+            if (!"client".equals(r.get("scope")) || !clientId.equals(r.get("client_id"))) {
+                throw new IllegalArgumentException("角色 " + rid + " 不属于应用 " + clientId);
+            }
+        }
+        jdbcTemplate.update(
+                "DELETE ur FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                + "WHERE ur.user_id=? AND r.scope='client' AND r.client_id=?", userId, clientId);
+        for (Long rid : roleIds) {
+            jdbcTemplate.update(
+                    "INSERT INTO sys_user_role (user_id, role_id, client_id) VALUES (?, ?, ?)",
+                    userId, rid, clientId);
+        }
+        log.info("用户应用角色绑定完成: user={} client={} bound={}", userId, clientId, roleIds.size());
+        return roleIds.size();
+    }
 }

@@ -59,8 +59,64 @@ public class AdminRoleController {
         }
     }
 
+    // ───────────── 应用角色创建 + 用户绑定（Phase 4 双视角·用户×系统） ─────────────
+
+    /** 创建应用级角色（client scope）。body: {"code": "ops-engineer", "name": "运维工程师"} */
+    @PostMapping("/clients/{clientId}/roles")
+    public Result<?> createClientRole(@PathVariable String clientId,
+                                      @RequestBody CreateRoleRequest body) {
+        if (body == null || isBlank(body.getCode())) {
+            return Result.fail(400, "缺少 code");
+        }
+        try {
+            long id = permissionService.createClientRole(clientId, body.getCode().trim(),
+                    isBlank(body.getName()) ? body.getCode().trim() : body.getName().trim(),
+                    body.getDescription());
+            return Result.ok(Map.of("roleId", id));
+        } catch (IllegalArgumentException e) {
+            return Result.fail(400, e.getMessage());
+        }
+    }
+
+    /** 用户在某应用的角色绑定 id 集合。 */
+    @GetMapping("/users/{userId}/client-roles")
+    public Result<?> userClientRoleIds(@PathVariable long userId, @RequestParam String client) {
+        return Result.ok(permissionService.userClientRoleIds(userId, client));
+    }
+
+    /** 用户在某应用的角色绑定全量覆盖。body: {"roleIds": [10, 11]} */
+    @PutMapping("/users/{userId}/client-roles")
+    public Result<?> assignUserClientRoles(@PathVariable long userId, @RequestParam String client,
+                                           @RequestBody AssignRolesRequest body) {
+        if (body == null || body.getRoleIds() == null) {
+            return Result.fail(400, "缺少 roleIds");
+        }
+        try {
+            return Result.ok(Map.of("bound",
+                    permissionService.assignUserClientRoles(userId, client, body.getRoleIds())));
+        } catch (IllegalArgumentException e) {
+            return Result.fail(400, e.getMessage());
+        }
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
+    }
+
     @Data
     public static class AssignRequest {
         private Set<String> codes;
+    }
+
+    @Data
+    public static class CreateRoleRequest {
+        private String code;
+        private String name;
+        private String description;
+    }
+
+    @Data
+    public static class AssignRolesRequest {
+        private java.util.Set<Long> roleIds;
     }
 }
