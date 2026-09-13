@@ -1,5 +1,6 @@
 package com.marschat.authcenter.config;
 
+import com.marschat.authcenter.service.PermissionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Configuration;
@@ -23,10 +24,13 @@ public class DatabaseInitializer implements CommandLineRunner {
 
     private final JdbcTemplate jdbcTemplate;
     private final PasswordEncoder passwordEncoder;
+    private final PermissionService permissionService;
 
-    public DatabaseInitializer(JdbcTemplate jdbcTemplate, PasswordEncoder passwordEncoder) {
+    public DatabaseInitializer(JdbcTemplate jdbcTemplate, PasswordEncoder passwordEncoder,
+                               PermissionService permissionService) {
         this.jdbcTemplate = jdbcTemplate;
         this.passwordEncoder = passwordEncoder;
+        this.permissionService = permissionService;
     }
 
     @Override
@@ -219,6 +223,28 @@ public class DatabaseInitializer implements CommandLineRunner {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用注册表（菜单上报元数据）'
             """);
 
+        // ============ Phase 7 · 账号映射表（统一身份 ↔ 各系统本地账号） ============
+        // 初衷对齐：各应用历史自有账号库（portal.sys_user / activecode.admin_user / cosmic.users /
+        // infra 配置式管理员）通过上报登记到中心，按 username/email 自动认领，剩余手工绑定。
+        createTableIfNotExists("app_account_mapping", """
+            CREATE TABLE IF NOT EXISTS app_account_mapping (
+                id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                user_id BIGINT NULL COMMENT '中心统一用户ID（NULL=未认领）',
+                client_id VARCHAR(64) NOT NULL COMMENT '应用（OIDC client）',
+                local_account VARCHAR(128) NOT NULL COMMENT '应用侧本地账号标识',
+                local_display_name VARCHAR(128) NULL COMMENT '应用侧显示名',
+                source VARCHAR(16) DEFAULT 'report' COMMENT 'report=上报 / auto=自动认领 / manual=手工绑定',
+                status TINYINT DEFAULT 1 COMMENT '1=有效 0=失效（全量覆盖后消失）',
+                linked_at DATETIME NULL COMMENT '认领/绑定时间',
+                last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '最近上报时间',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE INDEX uk_client_local (client_id, local_account),
+                INDEX idx_mapping_user (user_id),
+                INDEX idx_mapping_client (client_id, status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='应用账号映射表（统一身份↔各系统账号）'
+            """);
+
         // 存量库补列（幂等：information_schema 探明后执行，已存在则跳过）
         addColumnIfNotExists("user", "realm_id",
                 "ALTER TABLE user ADD COLUMN realm_id VARCHAR(50) DEFAULT 'kb' COMMENT '账号所属realm(账号池)'");
@@ -313,6 +339,9 @@ public class DatabaseInitializer implements CommandLineRunner {
         // （apps-registry.yml 派生），原 seedOidcClient + 5 个 seedXxx 硬编码方法已删除
         ensureAdminRole();
         seedRbacBase();
+        // Phase 7：默认授权种子——对零绑定的应用把全部 menu 权限点绑到平台 user 角色，
+        // 使 configured=true（菜单过滤真正接管）而普通用户默认仍全可见（零锁死、零回归）。
+        permissionService.syncDefaultGrantsForAllClients();
 
         createTableIfNotExists("sys_error_log", """
             CREATE TABLE IF NOT EXISTS sys_error_log (

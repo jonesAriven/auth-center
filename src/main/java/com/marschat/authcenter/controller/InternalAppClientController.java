@@ -1,5 +1,6 @@
 package com.marschat.authcenter.controller;
 
+import com.marschat.authcenter.service.AccountMappingService;
 import com.marschat.authcenter.service.PermissionService;
 import com.marschat.common.result.Result;
 import lombok.RequiredArgsConstructor;
@@ -11,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -29,6 +31,7 @@ import java.util.Map;
 public class InternalAppClientController {
 
     private final PermissionService permissionService;
+    private final AccountMappingService accountMappingService;
 
     /**
      * 菜单上报（全量覆盖语义，与 /admin/clients/{clientId}/menus 同落库逻辑）。
@@ -51,5 +54,31 @@ public class InternalAppClientController {
             return Result.fail(400, "缺少 menusYaml");
         }
         return Result.ok(permissionService.reportMenus(clientId, menusYaml));
+    }
+
+    /**
+     * 账号映射上报（全量覆盖语义）：应用把自己的**本地账号清单**登记到中心，
+     * 中心按 username/email 自动认领到统一身份，未认领的交管理员手工绑定。
+     *
+     * <p>body: {@code {"accounts":[{"account":"admin","name":"管理员"}, ...]}}，
+     * header: X-Client-Secret。调用方：各应用启动时的账号上报器（双模独立登录的
+     * 应急账号 + 存量本地账号）。与菜单上报共用同一应用身份校验，secret 为 NULL 一律 403。
+     */
+    @PutMapping("/{clientId}/accounts")
+    public Result<Map<String, Object>> reportAccounts(@PathVariable String clientId,
+                                                      @RequestHeader(value = "X-Client-Secret", required = false) String secret,
+                                                      @RequestBody Map<String, List<AccountMappingService.LocalAccount>> body) {
+        if (secret == null || secret.isBlank()) {
+            return Result.fail(401, "缺少 X-Client-Secret");
+        }
+        if (!permissionService.verifyClientSecret(clientId, secret)) {
+            log.warn("账号映射上报凭据校验失败: {}", clientId);
+            return Result.fail(403, "client secret 校验失败");
+        }
+        List<AccountMappingService.LocalAccount> accounts = body == null ? null : body.get("accounts");
+        if (accounts == null) {
+            return Result.fail(400, "缺少 accounts");
+        }
+        return Result.ok(accountMappingService.syncLocalAccounts(clientId, accounts));
     }
 }

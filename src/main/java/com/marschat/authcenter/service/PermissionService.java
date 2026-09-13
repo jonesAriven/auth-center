@@ -284,6 +284,9 @@ public class PermissionService {
                 VALUES (?, ?, 1, ?, NOW())
                 ON DUPLICATE KEY UPDATE menu_registry_json=VALUES(menu_registry_json), last_sync_at=NOW()
                 """, clientId, clientId, menusYaml);
+        // 上报后补默认授权：使 configured=true（过滤机制接管）而普通用户默认仍全可见（零锁死）。
+        // force=false → 仅当该应用当前零绑定时补种，已人工收窄的应用不会被覆盖。
+        ensureDefaultGrants(clientId, false);
         log.info("菜单上报完成: {} upsert={} retired={}", clientId, upserted, retired);
         return Map.of("upserted", upserted, "retired", retired);
     }
@@ -543,5 +546,86 @@ public class PermissionService {
         }
         log.info("用户应用角色绑定完成: user={} client={} bound={}", userId, clientId, roleIds.size());
         return roleIds.size();
+    }
+
+    // ═════════════════ 默认授权种子（Phase 7 · 权限统一管理「生效」） ═════════════════
+
+    /** 平台角色 id（scope=platform，client_id IS NULL，按 code）。 */
+    private Long platformRoleId(String code) {
+        try {
+            List<Long> ids = jdbcTemplate.queryForList(
+                    "SELECT id FROM sys_role WHERE scope='platform' AND client_id IS NULL AND code=?",
+                    Long.class, code);
+            return ids.isEmpty() ? null : ids.get(0);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 该应用是否已有任意「角色→权限」绑定（configured 的同源判据）。 */
+    public boolean hasAnyBinding(String clientId) {
+        try {
+            Integer n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_permission p ON p.id=rp.permission_id WHERE p.client_id=?",
+                    Integer.class, clientId);
+            return n != null && n > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 默认授权种子：把应用**全部有效 menu 权限点**绑定到平台 {@code user} 角色，
+     * 使 {@code configured=true}（菜单过滤机制真正接管）。
+     *
+     * <p>语义与取舍（为什么是"全菜单可见"）：
+     * <ul>
+     *   <li>R10 默认策略下 {@code configured=false} 时前端 fail-open = 全部菜单可见；
+     *       本种子把这一默认**显式化**，故零行为变化、零锁死风险（配置化≠锁死）；</li>
+     *   <li>只绑 <b>menu</b> 不绑 <b>api</b>：菜单=可见性（默认可见合理），
+     *       接口=动作（默认必须拒绝，由管理员显式授权）——安全默认姿态；</li>
+     *   <li>{@code force=false} 时**仅对当前零绑定的应用补种**：已经人工配置过授权的应用
+     *       （如 kb-ops 的 4 menu + 1 api 收窄基线）绝不覆盖。</li>
+     * </ul>
+     * 管理员随后可通过「角色授权 / 应用角色 / 用户级减法」在中心统一收窄。
+     *
+     * @return 本次新增的绑定条数
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public int ensureDefaultGrants(String clientId, boolean force) {
+        if (!force && hasAnyBinding(clientId)) {
+            return 0;
+        }
+        Long userRoleId = platformRoleId("user");
+        if (userRoleId == null) {
+            log.warn("默认授权种子跳过（平台 user 角色不存在）: {}", clientId);
+            return 0;
+        }
+        int n = jdbcTemplate.update("""
+                INSERT INTO sys_role_permission (role_id, permission_id)
+                SELECT ?, p.id FROM sys_permission p
+                WHERE p.client_id=? AND p.type='menu' AND p.status=1
+                  AND NOT EXISTS (SELECT 1 FROM sys_role_permission rp
+                                  WHERE rp.role_id=? AND rp.permission_id=p.id)
+                """, userRoleId, clientId, userRoleId);
+        if (n > 0) {
+            log.info("默认授权种子: {} 新增绑定 {} 条（平台 user ← 全部 menu）", clientId, n);
+        }
+        return n;
+    }
+
+    /** 启动批量补种：对所有启用中的应用补默认授权（已有绑定的应用自动跳过）。 */
+    public void syncDefaultGrantsForAllClients() {
+        try {
+            List<String> clients = jdbcTemplate.queryForList(
+                    "SELECT client_id FROM sys_app_client WHERE status=1", String.class);
+            int total = 0;
+            for (String c : clients) {
+                total += ensureDefaultGrants(c, false);
+            }
+            log.info("默认授权种子批量补种完成: 新增 {} 条（客户端 {} 个）", total, clients.size());
+        } catch (Exception e) {
+            log.warn("默认授权种子批量补种失败: {}", e.getMessage());
+        }
     }
 }
