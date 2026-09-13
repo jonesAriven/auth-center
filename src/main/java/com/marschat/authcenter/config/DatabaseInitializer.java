@@ -358,14 +358,20 @@ public class DatabaseInitializer implements CommandLineRunner {
         }
     }
 
-    /** 兜底引导：全库没有任何 admin 时，把 username=admin 的账号提升为 admin（幂等） */
+    /**
+     * 兜底引导：全库没有任何 admin/superadmin 时，把 username=admin 的账号提升为 admin（幂等）。
+     * ⚠️ 2026-09-13 事故修正：adminCount 原只统计 role='admin'——手动把 admin 升为 superadmin
+     * 后全库"无 admin"，本引导会把 superadmin **覆盖回 admin**（实锤发生过），随后删除保护
+     * 失效被真删。修正=统计口径含 superadmin，且 role 已是 superadmin 时绝不降级。
+     */
     private void ensureAdminRole() {
         try {
             Integer adminCount = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM user WHERE role = 'admin' AND deleted = 0", Integer.class);
+                "SELECT COUNT(*) FROM user WHERE role IN ('admin', 'superadmin') AND deleted = 0", Integer.class);
             if (adminCount == null || adminCount == 0) {
                 jdbcTemplate.update(
-                    "UPDATE user SET role = 'admin' WHERE username = 'admin' AND deleted = 0");
+                    "UPDATE user SET role = 'admin' WHERE username = 'admin' AND deleted = 0 "
+                    + "AND role NOT IN ('superadmin')");
                 log.info("已将内置 admin 账号引导为管理员角色");
             }
         } catch (Exception e) {

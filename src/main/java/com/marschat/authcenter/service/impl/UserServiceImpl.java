@@ -221,10 +221,11 @@ public class UserServiceImpl implements UserService {
         if (ROLE_SUPERADMIN.equals(user.getRole())) {
             throw new BusinessException("超级管理员不可删除");
         }
-        // 保底：至少保留 1 个 status=1 的 admin（沿用原逻辑）
-        if ("admin".equals(user.getRole())) {
+        // 保底：至少保留 1 个 status=1 的管理员（admin ∪ superadmin——否则删光 admin
+        // 只剩 superadmin 时会误拦正常删除）
+        if ("admin".equals(user.getRole()) || ROLE_SUPERADMIN.equals(user.getRole())) {
             Long adminCount = userMapper.selectCount(new LambdaQueryWrapper<User>()
-                    .eq(User::getRole, "admin").eq(User::getStatus, 1));
+                    .in(User::getRole, "admin", ROLE_SUPERADMIN).eq(User::getStatus, 1));
             if (adminCount != null && adminCount <= 1) {
                 throw new BusinessException("系统至少保留一个管理员，禁止删除");
             }
