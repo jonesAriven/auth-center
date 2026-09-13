@@ -21,6 +21,7 @@ clients:
   - client-id: marschat-kbweb
     name: MarsChat KB Web (SPA)
     type: public
+    menu-report-secret: ${KBWEB_MENU_REPORT_SECRET:fff08d4f9ca92f27ffb9111d1a9b8ed9e54769c3dc279bf3}
     scopes: ["openid", "profile"]
     grant-types: ["authorization_code", "refresh_token"]
     access-token-ttl-minutes: 30
@@ -55,6 +56,7 @@ clients:
   - client-id: marschat-inframon
     name: MarsChat Infra Monitor (SPA)
     type: public
+    menu-report-secret: ${INFRAMON_MENU_REPORT_SECRET:fd20b92c239eaad778f750817a33e67f6bc108179c008448}
     scopes: ["openid", "profile"]
     grant-types: ["authorization_code", "refresh_token"]
     access-token-ttl-minutes: 30

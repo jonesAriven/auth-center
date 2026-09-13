@@ -3,6 +3,8 @@ package com.marschat.authcenter.config;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
 import org.springframework.boot.ApplicationRunner;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -37,14 +39,17 @@ import java.util.UUID;
  */
 @Slf4j
 @Component
+@Order(Ordered.LOWEST_PRECEDENCE)
 public class ClientsYmlLoader implements ApplicationRunner {
 
     private final JdbcRegisteredClientRepository repository;
     private final PasswordEncoder passwordEncoder;
+    private final JdbcTemplate jdbcTemplate;
 
     public ClientsYmlLoader(JdbcTemplate jdbcTemplate, PasswordEncoder passwordEncoder) {
         this.repository = new JdbcRegisteredClientRepository(jdbcTemplate);
         this.passwordEncoder = passwordEncoder;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     @SuppressWarnings("unchecked")
@@ -81,6 +86,9 @@ public class ClientsYmlLoader implements ApplicationRunner {
                 // yml 中 key 存在但值为空（`key:` 无值）时 snakeyaml 解析为 null——getOrDefault 不生效
                 List<String> postLogouts = c.get("post-logout-redirect-uris") instanceof List<?> pl
                         ? (List<String>) pl : List.of();
+                // 应用上报凭据（Phase 4 P-B）：支持 ${ENV:default} 占位，null=未提供
+                String menuReportSecret = c.get("menu-report-secret") == null
+                        ? null : String.valueOf(c.get("menu-report-secret"));
 
                 RegisteredClient existing = repository.findByClientId(clientId);
                 if (existing == null) {
@@ -119,6 +127,7 @@ public class ClientsYmlLoader implements ApplicationRunner {
                     repository.save(b.build());
                     created++;
                     log.info("clients.yml 种子客户端 {}（{}）已就绪", clientId, type);
+                    syncAppClientSecret(clientId, String.valueOf(c.getOrDefault("name", clientId)), menuReportSecret);
                     continue;
                 }
                 boolean needUpdate = false;
@@ -144,6 +153,7 @@ public class ClientsYmlLoader implements ApplicationRunner {
                 } else {
                     unchanged++;
                 }
+                syncAppClientSecret(clientId, String.valueOf(c.getOrDefault("name", clientId)), menuReportSecret);
             } catch (Exception e) {
                 log.warn("clients.yml 客户端 {} 加载失败: {}", cSafe(c2(o)), e.getMessage());
             }
@@ -153,6 +163,59 @@ public class ClientsYmlLoader implements ApplicationRunner {
 
     private static boolean Bool(Object v, boolean dflt) {
         return v == null ? dflt : Boolean.parseBoolean(String.valueOf(v));
+    }
+
+    /**
+     * 应用上报凭据幂等同步（Phase 4 P-B 接入补全）：把 yml 的 {@code menu-report-secret}
+     * 写入 {@code sys_app_client.client_secret}（{@code /internal} 通道 X-Client-Secret 的比对源）。
+     *
+     * <p>幂等语义：① 无凭据时仅保证 {@code sys_app_client} 行存在（INSERT IGNORE，不触 secret）；
+     * ② 有凭据且库内 secret 为空/NULL 时补写；③ 库内已有非空值**不覆盖**（管理员就地轮换优先）。
+     *
+     * <p>执行顺序兜底：{@code sys_app_client} 行本由 DatabaseInitializer 从
+     * {@code oauth2_registered_client} 补齐，但两者同为启动期 runner，先后不确定——
+     * 这里自建行（upsert）消除顺序依赖。
+     */
+    private void syncAppClientSecret(String clientId, String name, String rawSecret) {
+        try {
+            if (rawSecret == null || rawSecret.isBlank()) {
+                jdbcTemplate.update(
+                        "INSERT IGNORE INTO sys_app_client (client_id, name, status) VALUES (?, ?, 1)",
+                        clientId, name);
+                return;
+            }
+            String resolved = resolveSecret(rawSecret);
+            String before = currentClientSecret(clientId);
+            if (before != null && !before.isBlank()) {
+                // 行存在且已有值：仅确保行在场，保留既有 secret
+                jdbcTemplate.update(
+                        "INSERT IGNORE INTO sys_app_client (client_id, name, status) VALUES (?, ?, 1)",
+                        clientId, name);
+                log.info("clients.yml 保留既有应用上报凭据 client_secret: {}（非空不覆盖）", clientId);
+                return;
+            }
+            jdbcTemplate.update("""
+                    INSERT INTO sys_app_client (client_id, name, status, client_secret)
+                    VALUES (?, ?, 1, ?)
+                    ON DUPLICATE KEY UPDATE client_secret = IF(client_secret IS NULL OR client_secret = '',
+                                                               VALUES(client_secret), client_secret)
+                    """, clientId, name, resolved);
+            log.info("clients.yml 补写应用上报凭据 client_secret: {}", clientId);
+        } catch (Exception e) {
+            log.warn("clients.yml 同步应用上报凭据失败 {}: {}", clientId, e.getMessage());
+        }
+    }
+
+    /** 读取 sys_app_client 当前 client_secret（行不存在/列为 NULL 时返回 null）。 */
+    private String currentClientSecret(String clientId) {
+        try {
+            List<String> rows = jdbcTemplate.query(
+                    "SELECT client_secret FROM sys_app_client WHERE client_id=?",
+                    (rs, i) -> rs.getString(1), clientId);
+            return rows.isEmpty() ? null : rows.get(0);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
