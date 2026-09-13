@@ -1,0 +1,143 @@
+# AUTO-GENERATED from apps-registry.yml by scripts/gen-from-registry.py — DO NOT EDIT
+clients:
+  - client-id: marschat-portal
+    name: MarsChat Portal
+    type: confidential
+    secret: portal-secret-2026
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - http://localhost:5173/auth/callback
+      - https://main.marschat.online/portal/auth/callback
+      - http://192.168.31.105:8095/portal/auth/callback
+    post-logout-redirect-uris:
+      - https://main.marschat.online/portal/login
+      - http://192.168.31.105:8095/portal/login
+      - http://localhost:5173/login
+  - client-id: marschat-kbweb
+    name: MarsChat KB Web (SPA)
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - http://localhost:5173/kb/sso-callback
+      - https://kb.marschat.online/kb/sso-callback
+      - http://192.168.31.105/kb/sso-callback
+    post-logout-redirect-uris:
+      - https://kb.marschat.online/kb/login
+      - http://192.168.31.105/kb/login
+      - http://localhost:5173/kb/login
+  - client-id: marschat-kbops
+    name: MarsChat KB Ops (SPA)
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - http://localhost:3001/ops/sso-callback
+      - https://kb.marschat.online/ops/sso-callback
+      - http://192.168.31.105/ops/sso-callback
+    post-logout-redirect-uris:
+      - https://kb.marschat.online/ops/login
+      - http://192.168.31.105/ops/login
+      - http://localhost:3001/ops/login
+  - client-id: marschat-inframon
+    name: MarsChat Infra Monitor (SPA)
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://monitor.marschat.online/infra/sso-callback
+      - http://192.168.31.105/infra/sso-callback
+      - http://localhost:3002/infra/sso-callback
+    post-logout-redirect-uris:
+      - https://monitor.marschat.online/infra/login
+      - http://192.168.31.105/infra/login
+      - http://localhost:3002/infra/login
+  - client-id: marschat-activecode
+    name: MarsChat ActiveCode (SPA)
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://tools.marschat.online/activecode/sso-callback.html
+      - http://192.168.31.182:18080/activecode/sso-callback.html
+      - http://192.168.31.105:18080/activecode/sso-callback.html
+    post-logout-redirect-uris:
+      - https://tools.marschat.online/activecode/login.html
+      - http://192.168.31.182:18080/activecode/login.html
+      - http://192.168.31.105:18080/activecode/login.html
+  - client-id: cosmic-studio
+    name: MarsChat COSMIC Studio
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://cosmic.marschat.online/sso-callback
+      - http://192.168.31.105:8310/sso-callback
+      - http://localhost:5173/sso-callback
+      - http://localhost:8310/sso-callback
+    post-logout-redirect-uris:
+  - client-id: marschat-memory
+    name: MarsChat Memory Extract Panel
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://memory.marschat.online/sso-callback
+      - http://192.168.31.105:8720/sso-callback
+    post-logout-redirect-uris:
+  - client-id: marschat-tokenhub
+    name: MarsChat TokenHub
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://tokenhub.marschat.online/api/admin/auth/oauth/callback
+      - http://192.168.31.105:13000/api/admin/auth/oauth/callback
+    post-logout-redirect-uris:
+  - client-id: frp-manager
+    name: MarsChat FRP Manager
+    type: public
+    scopes: ["openid", "profile"]
+    grant-types: ["authorization_code", "refresh_token"]
+    access-token-ttl-minutes: 30
+    refresh-token-ttl-days: 7
+    reuse-refresh-tokens: false
+    require-consent: false
+    redirect-uris:
+      - https://frp.marschat.online/sso-callback
+      - http://192.168.31.105:18082/sso-callback
+      - http://localhost:5173/sso-callback
+    post-logout-redirect-uris:
