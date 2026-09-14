@@ -19,6 +19,20 @@ public interface UserService {
 
     PageResult<User> listForAdmin(String realmId, String keyword, int page, int size);
 
+    /**
+     * 应用作用域用户列表（Phase 8「本系统用户」）。
+     *
+     * <p>语义：只返回「与本应用有关」的用户，判据三者取或——
+     * <ol>
+     *   <li>在本应用（{@code sys_user_role.client_id = clientId}）有角色绑定；</li>
+     *   <li>在本应用有账号映射认领（{@code app_account_mapping.client_id=clientId AND status=1 AND user_id 非空}）；</li>
+     *   <li>全局角色是 {@code admin}/{@code superadmin}（管理员始终可见——
+     *       保证首次配置时列表不为空、应用管理员能看到自己的账号）。</li>
+     * </ol>
+     * 每条记录回填 {@link User#getAppRoles()}（该用户在本应用的角色）。
+     */
+    PageResult<User> listForAdminScoped(String clientId, String realmId, String keyword, int page, int size);
+
     User createUser(String username, String password, String role, String nickname,
                     String email, String realmId, Long operatorId);
 

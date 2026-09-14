@@ -24,13 +24,29 @@ public class AdminUserController {
 
     private final UserService userService;
 
-    /** 用户列表（含禁用），支持 realm 过滤、关键字搜索（username/email/nickname）、分页 */
+    /**
+     * 用户列表（含禁用），支持 realm 过滤、关键字搜索（username/email/nickname）、分页。
+     *
+     * <p><b>双作用域（Phase 8）</b>——同一端点、两种语义，由 {@code client} 参数切换：
+     * <ul>
+     *   <li><b>不传 {@code client}</b> → <b>平台作用域</b>：全平台统一身份。
+     *       供中心侧「统一认证中心 → 统一用户」使用（宿主 portal）。</li>
+     *   <li><b>传 {@code client}</b> → <b>应用作用域</b>：只返回「与本应用有关」的用户
+     *       （在本应用有角色绑定 / 有本应用账号映射认领 / 是管理员）。
+     *       供各应用「本系统用户」使用，并回填每条记录的 {@code appRoles}。</li>
+     * </ul>
+     * 这样「应用侧只看本系统、中心侧看全平台」由**服务端强制**，而不是靠前端自觉。
+     */
     @GetMapping
     public Result<PageResult<User>> list(
             @RequestParam(required = false) String realmId,
             @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String client,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size) {
+        if (client != null && !client.isBlank()) {
+            return Result.ok(userService.listForAdminScoped(client.trim(), realmId, keyword, page, size));
+        }
         return Result.ok(userService.listForAdmin(realmId, keyword, page, size));
     }
 

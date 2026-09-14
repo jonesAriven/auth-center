@@ -12,11 +12,18 @@ import com.marschat.authcenter.service.UserService;
 import com.marschat.common.exception.BusinessException;
 import com.marschat.common.page.PageResult;
 import lombok.RequiredArgsConstructor;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -29,6 +36,7 @@ public class UserServiceImpl implements UserService {
     private final RefreshTokenMapper refreshTokenMapper;
     private final OperationLogService operationLogService;
     private final TokenVersionService tokenVersionService;
+    private final JdbcTemplate jdbcTemplate;
 
     @Override
     public User getProfile(Long userId) {
@@ -102,6 +110,92 @@ public class UserServiceImpl implements UserService {
         Page<User> result = userMapper.selectPage(pageObj, wrapper);
         result.getRecords().forEach(u -> u.setPassword(null));
         return PageResult.of(result.getRecords(), result.getTotal(), page, size);
+    }
+
+    /**
+     * 应用作用域列表（Phase 8「本系统用户」）——见 {@link UserService#listForAdminScoped} 契约。
+     *
+     * <p>实现要点：
+     * <ul>
+     *   <li>判据用 <b>EXISTS 子查询</b>而非 JOIN：一个用户在本应用可能有多条绑定，
+     *       JOIN 会让同一用户占多行 → 分页总数虚高、列表出现重复行。</li>
+     *   <li>先查 id 页（带 LIMIT/OFFSET），再用实体 Mapper 回查，
+     *       保证 {@code @TableLogic} 与字段映射与平台查询完全一致（不手写 row→entity）。</li>
+     *   <li>一次性回填整页的 {@code appRoles}，避免 N+1。</li>
+     * </ul>
+     */
+    @Override
+    public PageResult<User> listForAdminScoped(String clientId, String realmId, String keyword,
+                                               int page, int size) {
+        StringBuilder sql = new StringBuilder("""
+                FROM user u
+                WHERE u.deleted = 0
+                  AND (
+                        EXISTS (SELECT 1 FROM sys_user_role ur
+                                WHERE ur.user_id = u.id AND ur.client_id = ?)
+                     OR EXISTS (SELECT 1 FROM app_account_mapping m
+                                WHERE m.user_id = u.id AND m.client_id = ? AND m.status = 1)
+                     OR u.role IN ('admin', 'superadmin')
+                  )
+                """);
+        List<Object> args = new ArrayList<>();
+        args.add(clientId);
+        args.add(clientId);
+        if (realmId != null && !realmId.isBlank()) {
+            sql.append(" AND u.realm_id = ?");
+            args.add(realmId);
+        }
+        if (keyword != null && !keyword.isBlank()) {
+            sql.append(" AND (u.username LIKE ? OR u.email LIKE ? OR u.nickname LIKE ?)");
+            String like = "%" + keyword + "%";
+            args.add(like);
+            args.add(like);
+            args.add(like);
+        }
+
+        Long total = jdbcTemplate.queryForObject("SELECT COUNT(*) " + sql, Long.class, args.toArray());
+        long totalVal = total == null ? 0L : total;
+
+        List<Object> pageArgs = new ArrayList<>(args);
+        pageArgs.add(size);
+        pageArgs.add((page - 1) * size);
+        List<Long> ids = jdbcTemplate.queryForList(
+                "SELECT u.id " + sql + " ORDER BY u.created_at DESC LIMIT ? OFFSET ?",
+                Long.class, pageArgs.toArray());
+        if (ids.isEmpty()) {
+            return PageResult.of(List.of(), totalVal, page, size);
+        }
+
+        Map<Long, User> byId = userMapper.selectBatchIds(ids).stream()
+                .collect(Collectors.toMap(User::getId, u -> u));
+        List<User> ordered = ids.stream().map(byId::get).filter(Objects::nonNull).collect(Collectors.toList());
+        ordered.forEach(u -> u.setPassword(null));
+        fillAppRoles(clientId, ordered);
+        return PageResult.of(ordered, totalVal, page, size);
+    }
+
+    /** 回填「该用户在本应用（client）下的角色」→ {@code [{id,code,name}]}（整页一次查询，避免 N+1） */
+    private void fillAppRoles(String clientId, List<User> users) {
+        if (users.isEmpty()) {
+            return;
+        }
+        // idList 由实体主键拼装，不含外部输入，无注入风险
+        String idList = users.stream().map(u -> String.valueOf(u.getId())).collect(Collectors.joining(","));
+        List<Map<String, Object>> bindings = jdbcTemplate.queryForList(
+                "SELECT ur.user_id AS userId, r.id AS id, r.code AS code, r.name AS name "
+                        + "FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                        + "WHERE ur.client_id = ? AND ur.user_id IN (" + idList + ")",
+                clientId);
+        Map<Long, List<Map<String, Object>>> byUser = new HashMap<>();
+        for (Map<String, Object> b : bindings) {
+            Long uid = ((Number) b.get("userId")).longValue();
+            Map<String, Object> role = new LinkedHashMap<>();
+            role.put("id", b.get("id"));
+            role.put("code", b.get("code"));
+            role.put("name", b.get("name"));
+            byUser.computeIfAbsent(uid, k -> new ArrayList<>()).add(role);
+        }
+        users.forEach(u -> u.setAppRoles(byUser.getOrDefault(u.getId(), List.of())));
     }
 
     @Override
