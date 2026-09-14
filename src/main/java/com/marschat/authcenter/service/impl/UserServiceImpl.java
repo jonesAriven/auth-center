@@ -8,6 +8,7 @@ import com.marschat.authcenter.mapper.RefreshTokenMapper;
 import com.marschat.authcenter.mapper.UserMapper;
 import com.marschat.authcenter.service.OperationLogService;
 import com.marschat.authcenter.service.TokenVersionService;
+import com.marschat.authcenter.security.RoleCodes;
 import com.marschat.authcenter.service.UserService;
 import com.marschat.common.exception.BusinessException;
 import com.marschat.common.page.PageResult;
@@ -29,7 +30,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class UserServiceImpl implements UserService {
 
-    private static final String ROLE_SUPERADMIN = "superadmin";
+    /** 平台角色 code 统一取自 {@link RoleCodes}，禁止再写裸字符串（§31.5）。 */
+    private static final String ROLE_SUPERADMIN = RoleCodes.SUPERADMIN;
 
     private final UserMapper userMapper;
     private final PasswordEncoder passwordEncoder;
@@ -255,7 +257,7 @@ public class UserServiceImpl implements UserService {
 
         // 自身保护（防误操作锁死在管理界面外）
         if (userId.equals(operatorId)) {
-            if (role != null && !"admin".equals(normalizeRole(role)) && !ROLE_SUPERADMIN.equals(normalizeRole(role))) {
+            if (role != null && !RoleCodes.ADMIN.equals(normalizeRole(role)) && !ROLE_SUPERADMIN.equals(normalizeRole(role))) {
                 throw new BusinessException("不能修改自己的角色");
             }
             if (status != null && status == 0) {
@@ -317,9 +319,9 @@ public class UserServiceImpl implements UserService {
         }
         // 保底：至少保留 1 个 status=1 的管理员（admin ∪ superadmin——否则删光 admin
         // 只剩 superadmin 时会误拦正常删除）
-        if ("admin".equals(user.getRole()) || ROLE_SUPERADMIN.equals(user.getRole())) {
+        if (RoleCodes.ADMIN.equals(user.getRole()) || ROLE_SUPERADMIN.equals(user.getRole())) {
             Long adminCount = userMapper.selectCount(new LambdaQueryWrapper<User>()
-                    .in(User::getRole, "admin", ROLE_SUPERADMIN).eq(User::getStatus, 1));
+                    .in(User::getRole, RoleCodes.ADMIN, ROLE_SUPERADMIN).eq(User::getStatus, 1));
             if (adminCount != null && adminCount <= 1) {
                 throw new BusinessException("系统至少保留一个管理员，禁止删除");
             }
@@ -354,7 +356,7 @@ public class UserServiceImpl implements UserService {
             return "user";
         }
         String r = role.trim().toLowerCase();
-        if (!"admin".equals(r) && !"user".equals(r) && !ROLE_SUPERADMIN.equals(r)) {
+        if (!RoleCodes.ADMIN.equals(r) && !RoleCodes.USER.equals(r) && !ROLE_SUPERADMIN.equals(r)) {
             throw new BusinessException("角色只允许 admin/user/" + ROLE_SUPERADMIN);
         }
         return r;

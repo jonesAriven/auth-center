@@ -38,10 +38,10 @@ public class UserDetailsServiceImpl implements UserDetailsService {
         authorities.add(new SimpleGrantedAuthority("ROLE_USER"));
         // superadmin ⊇ admin：管理接口 @PreAuthorize("hasRole('ADMIN')") 对超管同样放行
         // （层级包含）；否则 role=superadmin 的用户反而进不了 /admin/**（2026-09-13 实测）
-        if ("admin".equals(user.getRole()) || "superadmin".equals(user.getRole())) {
+        if (RoleCodes.ADMIN.equals(user.getRole()) || RoleCodes.SUPERADMIN.equals(user.getRole())) {
             authorities.add(new SimpleGrantedAuthority("ROLE_ADMIN"));
         }
-        if ("superadmin".equals(user.getRole())) {
+        if (RoleCodes.SUPERADMIN.equals(user.getRole())) {
             authorities.add(new SimpleGrantedAuthority("ROLE_SUPERADMIN"));
         }
         return new org.springframework.security.core.userdetails.User(

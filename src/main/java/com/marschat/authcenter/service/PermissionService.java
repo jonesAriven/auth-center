@@ -1,5 +1,7 @@
 package com.marschat.authcenter.service;
 
+import com.marschat.authcenter.config.AuthzProperties;
+import com.marschat.authcenter.security.RoleCodes;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,6 +46,9 @@ public class PermissionService {
     /** 操作审计（Phase 8：应用级角色绑定/移出必须留痕） */
     private final OperationLogService operationLogService;
 
+    /** 授权默认策略（strict=默认最小权限 / legacy=默认全给）。 */
+    private final AuthzPolicyService authzPolicy;
+
     /** 单次 composite 展开深度上限（防环）。 */
     private static final int MAX_DEPTH = 8;
 
@@ -53,12 +58,21 @@ public class PermissionService {
 
         Set<String> roleCodes = new LinkedHashSet<>(platformRoles);
         roleCodes.addAll(clientRoleCodes);
-        Set<Long> roleIds = roleIdsByCodes(userId, clientId, roleCodes);
+        // ⚠️ 作用域分离：平台角色 code 只在 platform 作用域解析，应用角色 code 只在本应用
+        //    解析。改造前是「code 全域匹配」，client 侧建一个同名 admin 角色即全域提权。
+        Set<Long> roleIds = new HashSet<>();
+        roleIds.addAll(roleIdsByCodes(platformRoles, "platform", null));
+        roleIds.addAll(roleIdsByCodes(clientRoleCodes, "client", clientId));
         expandComposites(roleIds, 0);
         roleCodes.addAll(roleCodesByIds(roleIds));
 
         Set<String> permissions = permissionsFor(clientId, roleIds);
         boolean configured = permissionConfigured(clientId);
+        // strict：public 菜单 = 「已登录即可见」，与角色绑定无关地兜底补上，
+        // 避免「应用尚未给任何角色授权」时登录后一片空白。
+        if (authzPolicy.isStrict(clientId)) {
+            permissions.addAll(authzPolicy.publicMenuCodes(clientId));
+        }
         // R9 用户级减法：角色默认权限 − 用户 override（deny）——只减不加
         permissions.removeAll(deniedMenuCodes(userId, clientId));
 
@@ -68,6 +82,8 @@ public class PermissionService {
         out.put("roles", List.copyOf(roleCodes));
         out.put("permissions", List.copyOf(permissions));
         out.put("configured", configured);
+        out.put("authzMode", authzPolicy.isStrict(clientId)
+                ? AuthzProperties.MODE_STRICT : AuthzProperties.MODE_LEGACY);
         return out;
     }
 
@@ -117,22 +133,47 @@ public class PermissionService {
         }
     }
 
-    /** 角色 code → id（platform 绑定按 code+scope=platform；client 绑定按 code+scope=client+本应用）。 */
-    private Set<Long> roleIdsByCodes(long userId, String clientId, Set<String> codes) {
+    /**
+     * 角色 code → id（<b>带作用域</b>）。
+     *
+     * <p>⚠️ 改造前这里是「按 code 全域匹配」：{@code scope='platform' OR (scope='client' AND client_id=?)}
+     * 一把梭，意味着任一应用只要建一个 code 与平台角色同名的角色（如 {@code admin}），
+     * 就能让持有该平台角色的用户在全域命中它 —— 改一个字段即提权，且
+     * {@code sys_user_role} 里查不到痕迹，审计不可信。
+     * <p>改造后调用方必须显式声明作用域，两条路径互不串味。
+     *
+     * @param codes     角色 code 集合
+     * @param scope     {@code platform}（clientId 传 null）或 {@code client}（clientId 必填）
+     * @param clientId  scope=client 时的应用标识
+     */
+    public Set<Long> roleIdsByCodes(Set<String> codes, String scope, String clientId) {
         Set<Long> out = new HashSet<>();
-        if (codes.isEmpty()) {
+        if (codes == null || codes.isEmpty() || scope == null) {
+            return out;
+        }
+        boolean platform = "platform".equals(scope);
+        if (!platform && !"client".equals(scope)) {
+            log.warn("非法角色作用域: {}（只接受 platform|client）", scope);
             return out;
         }
         String placeholders = String.join(",", java.util.Collections.nCopies(codes.size(), "?"));
-        Object[] params = Stream.concat(Arrays.stream(codes.toArray()), Stream.of(clientId)).toArray();
+        String sql;
+        Object[] params;
+        if (platform) {
+            sql = ("SELECT DISTINCT r.id FROM sys_role r "
+                    + "WHERE r.code IN (%s) AND r.scope='platform' AND r.client_id IS NULL")
+                    .formatted(placeholders);
+            params = codes.toArray();
+        } else {
+            sql = ("SELECT DISTINCT r.id FROM sys_role r "
+                    + "WHERE r.code IN (%s) AND r.scope='client' AND r.client_id=?")
+                    .formatted(placeholders);
+            params = Stream.concat(codes.stream(), Stream.of(clientId)).toArray();
+        }
         try {
-            out.addAll(jdbcTemplate.queryForList("""
-                    SELECT DISTINCT r.id FROM sys_role r
-                    WHERE r.code IN (%s)
-                      AND (r.scope='platform' OR (r.scope='client' AND r.client_id=?))
-                    """.formatted(placeholders), Long.class, params));
+            out.addAll(jdbcTemplate.queryForList(sql, Long.class, params));
         } catch (Exception e) {
-            log.debug("角色 id 解析失败: {}", e.getMessage());
+            log.debug("角色 id 解析失败(scope={}): {}", scope, e.getMessage());
         }
         return out;
     }
@@ -196,13 +237,31 @@ public class PermissionService {
     }
 
     /**
-     * 该应用是否「已配置授权」：存在至少一条「角色→权限」绑定
-     * （{@code sys_role_permission ⋈ sys_permission}，按本 client 过滤）。
+     * 该应用是否「已配置授权」。
+     *
      * <p>⚠️ 判据是「有角色绑定」而非「有权限点记录」——菜单上报只写 sys_permission 定义
      * （0 条角色绑定），若以「有记录」判定，刚接入上报的应用会对非超管立即过滤锁死
      * （「已上报菜单定义」≠「已配置授权」）。解耦后：漏配授权不锁死，配了第一条绑定即接管。
+     *
+     * <h3>strict 模式：与「是否全量绑定」彻底解耦</h3>
+     * 改造前为了让 configured 变 true，把应用<b>全部 menu</b> 绑给平台 user 角色 —— 这就是
+     * 「默认全给」的病根。strict 下改为：
+     * <pre>
+     *   configured = 有任意角色-权限绑定  OR  存在 public 菜单
+     * </pre>
+     * 即：应用只要声明了「已登录即可见」的 public 菜单、管理员做过任何一条授权、
+     * 或该应用上报过任何权限点定义，过滤机制就接管（前端守卫照常工作），
+     * <b>不再需要靠全量绑定去刷 true</b>。
+     * <p>第三项（有权限点定义）是 fail-open 的封堵：若某应用的绑定全在默认角色上、
+     * 被 strict 收敛摘空，而它又没声明 public 菜单，此时若 configured=false，
+     * 前端 fail-open 会让所有人看到全部菜单 —— 比收敛前更糟。故只要有定义即接管。
      */
     private boolean permissionConfigured(String clientId) {
+        if (authzPolicy.isStrict(clientId)) {
+            return hasAnyBinding(clientId)
+                    || authzPolicy.hasPublicMenu(clientId)
+                    || authzPolicy.hasAnyPermission(clientId);
+        }
         try {
             Integer n = jdbcTemplate.queryForObject(
                     "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_permission p ON p.id=rp.permission_id WHERE p.client_id=?",
@@ -312,12 +371,24 @@ public class PermissionService {
                 effParent = findMenuIdByCode(clientId, String.valueOf(m.get("parent")));
             }
             int sort = m.get("order") == null ? 0 : Integer.parseInt(String.valueOf(m.get("order")));
+            // public 标记（strict 默认最小权限下的唯一例外：「已登录即可见」菜单，如工作台/首页）
+            boolean pub = isTruthy(m.get("public"));
             jdbcTemplate.update("""
                     INSERT INTO sys_permission (client_id, type, code, name, parent_id, sort, status)
                     VALUES (?, 'menu', ?, ?, ?, ?, 1)
                     ON DUPLICATE KEY UPDATE name=VALUES(name), parent_id=VALUES(parent_id),
                                             sort=VALUES(sort), status=1
                     """, clientId, key, title, effParent, sort);
+            // public 标记单独更新：与全量覆盖语义一致（上次标了、本次没标 → 归 0），
+            // 且列缺失（老库未补列）时只降级不中断上报主流程。
+            try {
+                jdbcTemplate.update(
+                        "UPDATE sys_permission SET is_public=? "
+                        + "WHERE client_id=? AND type='menu' AND code=?",
+                        pub ? 1 : 0, clientId, key);
+            } catch (Exception e) {
+                log.debug("写入 public 标记失败（is_public 列缺失？）: {}", e.getMessage());
+            }
             collectedKeys.add("menu:" + key);
             count++;
             if (m.get("children") instanceof List<?> kids && !kids.isEmpty()) {
@@ -331,6 +402,18 @@ public class PermissionService {
             }
         }
         return count;
+    }
+
+    /** YAML 布尔宽松解析：{@code public: true / "true" / "yes" / 1} 均视为真。 */
+    private static boolean isTruthy(Object v) {
+        if (v == null) {
+            return false;
+        }
+        if (v instanceof Boolean b) {
+            return b;
+        }
+        String s = String.valueOf(v).trim();
+        return "true".equalsIgnoreCase(s) || "yes".equalsIgnoreCase(s) || "1".equals(s);
     }
 
     /**
@@ -598,6 +681,17 @@ public class PermissionService {
 
     // ═════════════════ 默认授权种子（Phase 7 · 权限统一管理「生效」） ═════════════════
 
+    /** 启用中的应用 client_id 列表（策略端点遍历用）。 */
+    public List<String> enabledClientIds() {
+        try {
+            return jdbcTemplate.queryForList(
+                    "SELECT client_id FROM sys_app_client WHERE status=1 ORDER BY client_id", String.class);
+        } catch (Exception e) {
+            log.warn("列应用失败: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
     /** 平台角色 id（scope=platform，client_id IS NULL，按 code）。 */
     private Long platformRoleId(String code) {
         try {
@@ -623,58 +717,201 @@ public class PermissionService {
     }
 
     /**
-     * 默认授权种子：把应用**全部有效 menu 权限点**绑定到平台 {@code user} 角色，
-     * 使 {@code configured=true}（菜单过滤机制真正接管）。
+     * 默认授权种子（按模式分流）。
      *
-     * <p>语义与取舍（为什么是"全菜单可见"）：
+     * <h3>⚠️ 改造前（legacy）</h3>
+     * 把应用<b>全部有效 menu 权限点</b>绑到平台 {@code user} 角色，只为把
+     * {@code configured} 刷成 true。实测副作用：平台普通用户（role_id=8）因此持有
+     * cosmic 8/8、kbweb 15/15、inframon 6/6、portal 2/2 全量菜单 + kbops 4 menu，
+     * 外加 <b>api {@code hosts:create}（创建主机·写操作）</b> —— 「权限统一管理」名存实亡。
+     *
+     * <h3>改造后（strict，默认）</h3>
+     * 只补发 {@code public} 菜单（应用自己在 menu-registry.yml 标记 {@code public: true}
+     * 的「已登录即可见」菜单）。其余菜单与<b>所有 api</b> 一律不进默认可见集，
+     * 必须由应用角色显式授权。
      * <ul>
-     *   <li>R10 默认策略下 {@code configured=false} 时前端 fail-open = 全部菜单可见；
-     *       本种子把这一默认**显式化**，故零行为变化、零锁死风险（配置化≠锁死）；</li>
-     *   <li>只绑 <b>menu</b> 不绑 <b>api</b>：菜单=可见性（默认可见合理），
-     *       接口=动作（默认必须拒绝，由管理员显式授权）——安全默认姿态；</li>
-     *   <li>{@code force=false} 时**仅对当前零绑定的应用补种**：已经人工配置过授权的应用
-     *       （如 kb-ops 的 4 menu + 1 api 收窄基线）绝不覆盖。</li>
+     *   <li>菜单=可见性（public 者默认可见合理），接口=动作（默认必须拒绝）；</li>
+     *   <li>{@code configured} 已与「是否全量绑定」解耦（见 {@link #permissionConfigured}），
+     *       不再需要靠全量绑定刷 true；</li>
+     *   <li>补发是<b>加法的、幂等的</b>，可每次启动执行，不会覆盖人工收窄。</li>
      * </ul>
-     * 管理员随后可通过「角色授权 / 应用角色 / 用户级减法」在中心统一收窄。
      *
+     * @param force legacy 模式下为 true 表示无视「已有绑定」护栏强制补发（一键回滚用）
      * @return 本次新增的绑定条数
      */
     @org.springframework.transaction.annotation.Transactional
     public int ensureDefaultGrants(String clientId, boolean force) {
+        if (authzPolicy.isStrict(clientId)) {
+            return authzPolicy.grantPublicMenus(clientId);
+        }
         if (!force && hasAnyBinding(clientId)) {
             return 0;
         }
-        Long userRoleId = platformRoleId("user");
-        if (userRoleId == null) {
-            log.warn("默认授权种子跳过（平台 user 角色不存在）: {}", clientId);
-            return 0;
-        }
-        int n = jdbcTemplate.update("""
-                INSERT INTO sys_role_permission (role_id, permission_id)
-                SELECT ?, p.id FROM sys_permission p
-                WHERE p.client_id=? AND p.type='menu' AND p.status=1
-                  AND NOT EXISTS (SELECT 1 FROM sys_role_permission rp
-                                  WHERE rp.role_id=? AND rp.permission_id=p.id)
-                """, userRoleId, clientId, userRoleId);
-        if (n > 0) {
-            log.info("默认授权种子: {} 新增绑定 {} 条（平台 user ← 全部 menu）", clientId, n);
-        }
-        return n;
+        return authzPolicy.grantAllMenus(clientId);
     }
 
-    /** 启动批量补种：对所有启用中的应用补默认授权（已有绑定的应用自动跳过）。 */
+    /**
+     * 启动批量补种：对所有启用中的应用按各自生效模式补默认授权。
+     *
+     * <h3>切回 legacy 的一次性回滚</h3>
+     * 若某应用曾被 strict 收敛过（{@code strict_migrated=1}），切回 legacy 时
+     * <b>强制</b>把全量 menu 补回默认可见角色并清除标记 —— 这就是「一键回退且功能等价」：
+     * 只做一次，之后重启不再插手，管理员可继续手工收窄。
+     */
     public void syncDefaultGrantsForAllClients() {
         try {
             List<String> clients = jdbcTemplate.queryForList(
                     "SELECT client_id FROM sys_app_client WHERE status=1", String.class);
             int total = 0;
             for (String c : clients) {
-                total += ensureDefaultGrants(c, false);
+                if (authzPolicy.isStrict(c)) {
+                    total += ensureDefaultGrants(c, false);
+                } else if (authzPolicy.isStrictMigrated(c)) {
+                    total += ensureDefaultGrants(c, true);
+                    authzPolicy.resetStrictMigrated(c);
+                    log.info("legacy 回滚: {} 已补回全量默认菜单（一次性）", c);
+                } else {
+                    total += ensureDefaultGrants(c, false);
+                }
             }
-            log.info("默认授权种子批量补种完成: 新增 {} 条（客户端 {} 个）", total, clients.size());
+            log.info("默认授权种子批量补种完成（mode={}）: 新增 {} 条（客户端 {} 个）",
+                    authzPolicy.mode(), total, clients.size());
         } catch (Exception e) {
             log.warn("默认授权种子批量补种失败: {}", e.getMessage());
         }
+    }
+
+    // ═════════════ strict 收敛（默认最小权限落地 + 影响面预演） ═════════════
+
+    /**
+     * 对单个应用执行 strict 收敛：补发 public 菜单 +（一次性）摘除非 public 权限绑定。
+     *
+     * <p>「摘除」只跑一次（{@code sys_app_client.strict_migrated}），否则管理员后续在中心
+     * 手工补的授权会在每次重启时被静默回滚；{@code force=true} 可强制重跑。
+     *
+     * @return {publicGranted, pruned, migrated}
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public Map<String, Object> enforceStrictForClient(String clientId, boolean force) {
+        if (!authzPolicy.isStrict(clientId)) {
+            return Map.of("client", clientId, "strict", false, "publicGranted", 0, "pruned", 0, "migrated", false);
+        }
+        int granted = authzPolicy.grantPublicMenus(clientId);
+        int pruned = 0;
+        boolean migrated = false;
+        if (force || !authzPolicy.isStrictMigrated(clientId)) {
+            pruned = authzPolicy.pruneNonPublic(clientId);
+            authzPolicy.markStrictMigrated(clientId);
+            migrated = true;
+        }
+        return Map.of("client", clientId, "strict", true,
+                "publicGranted", granted, "pruned", pruned, "migrated", migrated);
+    }
+
+    /**
+     * 启动批量 strict 收敛（幂等）：对所有启用且生效模式为 strict 的应用执行
+     * {@link #enforceStrictForClient}。legacy 应用完全不动。
+     */
+    public Map<String, Object> enforceStrictForAllClients() {
+        int granted = 0;
+        int pruned = 0;
+        int clients = 0;
+        try {
+            List<String> all = jdbcTemplate.queryForList(
+                    "SELECT client_id FROM sys_app_client WHERE status=1", String.class);
+            for (String c : all) {
+                if (!authzPolicy.isStrict(c)) {
+                    continue;
+                }
+                try {
+                    Map<String, Object> r = enforceStrictForClient(c, false);
+                    granted += (int) r.get("publicGranted");
+                    pruned += (int) r.get("pruned");
+                    clients++;
+                } catch (Exception e) {
+                    log.warn("strict 收敛失败（跳过 {}）: {}", c, e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("strict 收敛批量执行失败: {}", e.getMessage());
+        }
+        if (granted + pruned > 0) {
+            log.info("strict 收敛完成: 应用 {} 个, 补发 public {} 条, 摘除非 public {} 条",
+                    clients, granted, pruned);
+        }
+        return Map.of("clients", clients, "publicGranted", granted, "pruned", pruned);
+    }
+
+    /**
+     * 影响面预演：切到 strict 后，哪些用户会失去哪些权限点。
+     *
+     * <p>算法：{@code after} = （收敛后仍有效的角色 → 权限）∪ public 菜单 − 用户 deny。
+     * 收敛会摘掉「平台 user/admin、应用 user」三个默认角色上的非 public 绑定，
+     * 故模拟时把这三个角色排除后再算，其余角色（应用 admin / 自定义角色）保持不变。
+     *
+     * @param clientId 应用标识
+     * @param mode     {@code strict}（默认）或 {@code legacy}
+     * @return 影响面明细（不改数据，只读）
+     */
+    public Map<String, Object> impact(String clientId, String mode) {
+        boolean strict = !AuthzProperties.MODE_LEGACY.equalsIgnoreCase(mode);
+        Map<String, Object> out = new HashMap<>();
+        out.put("client", clientId);
+        out.put("mode", strict ? AuthzProperties.MODE_STRICT : AuthzProperties.MODE_LEGACY);
+        out.put("publicMenus", List.copyOf(authzPolicy.publicMenuCodes(clientId)));
+        out.put("configuredNow", permissionConfigured(clientId));
+
+        List<Map<String, Object>> users = new ArrayList<>();
+        List<Long> userIds;
+        try {
+            userIds = jdbcTemplate.queryForList(
+                    "SELECT id FROM user WHERE deleted=0 AND status=1 ORDER BY id", Long.class);
+        } catch (Exception e) {
+            userIds = new ArrayList<>();
+        }
+        for (Long uid : userIds) {
+            Map<String, Object> row = new HashMap<>();
+            row.put("userId", uid);
+            row.put("username", usernameOf(uid));
+            Set<String> platformRoles = platformRoles(uid);
+            Set<String> clientRoles = clientRoleCodes(uid, clientId);
+            row.put("platformRoles", List.copyOf(platformRoles));
+            row.put("clientRoles", List.copyOf(clientRoles));
+
+            Set<Long> roleIds = new HashSet<>();
+            roleIds.addAll(roleIdsByCodes(platformRoles, "platform", null));
+            roleIds.addAll(roleIdsByCodes(clientRoles, "client", clientId));
+            expandComposites(roleIds, 0);
+
+            Set<String> denied = deniedMenuCodes(uid, clientId);
+
+            Set<String> before = new LinkedHashSet<>(permissionsFor(clientId, roleIds));
+            before.removeAll(denied);
+
+            Set<String> after;
+            if (strict) {
+                Set<Long> surviving = new HashSet<>(roleIds);
+                surviving.removeAll(new HashSet<>(authzPolicy.defaultVisibleRoleIds(clientId)));
+                after = new LinkedHashSet<>(permissionsFor(clientId, surviving));
+                after.addAll(authzPolicy.publicMenuCodes(clientId));
+            } else {
+                after = new LinkedHashSet<>(before);
+            }
+            after.removeAll(denied);
+
+            Set<String> lost = new LinkedHashSet<>(before);
+            lost.removeAll(after);
+
+            row.put("before", List.copyOf(before));
+            row.put("after", List.copyOf(after));
+            row.put("lost", List.copyOf(lost));
+            row.put("affected", !lost.isEmpty());
+            users.add(row);
+        }
+        out.put("userCount", users.size());
+        out.put("affectedUserCount", users.stream().filter(u -> Boolean.TRUE.equals(u.get("affected"))).count());
+        out.put("users", users);
+        return out;
     }
 
     // ═════════════ 默认应用角色种子（Phase 8 收尾） ═════════════
@@ -758,21 +995,27 @@ public class PermissionService {
         int roles = ensureClientRoleExists(clientId, "admin", "应用管理员")
                 + ensureClientRoleExists(clientId, "user", "普通用户");
 
-        int permBinds = bindRolePermsIfEmpty(clientId, "admin", List.of("menu", "api"))
-                + bindRolePermsIfEmpty(clientId, "user", List.of("menu"));
+        // strict：应用「普通用户」角色也只拿 public 菜单（否则平台 user → 应用 user 的
+        // 默认绑定会把全量菜单又送回来，最小权限形同虚设）。
+        // 应用「管理员」角色仍持有本应用全量 menu+api —— 应用管理员对自己应用全权是设计意图，
+        // 也是超管/平台管理员进各应用管理台的通路（实测 admin 账号靠它保持不受影响）。
+        boolean strict = authzPolicy.isStrict(clientId);
+        int permBinds = bindRolePermsIfEmpty(clientId, "admin", List.of("menu", "api"), false)
+                + bindRolePermsIfEmpty(clientId, "user", List.of("menu"), strict);
 
         int userBinds = 0;
         // ① 应用管理员 ← 平台 superadmin/admin：按 **(client, role) 判空**独立播种。
         //    语义上「超管就是每个系统的管理员」是恒定真值，且超管本就绕过 RBAC、增删皆无副作用，
         //    故不受下面「应用零绑定」护栏限制——否则像 kb-ops 这种已有 ops-viewer 绑定的应用
         //    会被整体跳过，导致它的「应用管理员」角色无人绑定（实测踩中）。
-        userBinds += grantPlatformUsers(clientId, "admin", List.of("superadmin", "admin"), true);
+        userBinds += grantPlatformUsers(clientId, "admin",
+                List.of(RoleCodes.SUPERADMIN, RoleCodes.ADMIN), true);
         // ② 普通用户 ← 平台普通用户：受「该应用零 client 级用户绑定」护栏，不覆盖人工增删。
         Integer existingUserBindings = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
                         + "WHERE r.scope='client' AND r.client_id=?", Integer.class, clientId);
         if (existingUserBindings == null || existingUserBindings == 0) {
-            userBinds += grantPlatformUsers(clientId, "user", List.of("user"), false);
+            userBinds += grantPlatformUsers(clientId, "user", List.of(RoleCodes.USER), false);
         }
         return Map.of("roles", roles, "permissionBindings", permBinds, "userBindings", userBinds);
     }
@@ -797,8 +1040,11 @@ public class PermissionService {
      * <p>⚠️ 该角色**当前已有任意权限绑定**时直接返回 0 —— 这是「不覆盖人工收窄」的护栏
      * （与 {@link #ensureDefaultGrants} 的 force=false 同一取舍）。
      * 注意判据是**按角色**而非按 type：否则先绑 menu 再绑 api 时第二次会被自己的第一条挡住。
+     *
+     * @param publicOnly strict 下为 true：只绑 {@code public} 菜单（默认最小权限）
      */
-    private int bindRolePermsIfEmpty(String clientId, String roleCode, List<String> types) {
+    private int bindRolePermsIfEmpty(String clientId, String roleCode, List<String> types,
+                                     boolean publicOnly) {
         Integer cnt = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_role r ON r.id = rp.role_id "
                         + "WHERE r.scope='client' AND r.client_id=? AND r.code=?",
@@ -811,12 +1057,15 @@ public class PermissionService {
         args.add(clientId);
         args.add(roleCode);
         args.addAll(types);
+        // strict 最小权限：只绑 public 菜单（且 api 天然不在 types 里）
+        String publicCond = publicOnly ? "  AND p.is_public=1 " : "";
         return jdbcTemplate.update(
                 "INSERT INTO sys_role_permission (role_id, permission_id) "
                         + "SELECT r.id, p.id FROM sys_role r "
                         + "JOIN sys_permission p ON p.client_id = r.client_id "
                         + "WHERE r.scope='client' AND r.client_id=? AND r.code=? "
                         + "  AND p.type IN (" + ph + ") AND p.status=1 "
+                        + publicCond
                         + "  AND NOT EXISTS (SELECT 1 FROM sys_role_permission rp "
                         + "                  WHERE rp.role_id=r.id AND rp.permission_id=p.id)",
                 args.toArray());

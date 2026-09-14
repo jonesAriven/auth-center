@@ -247,6 +247,15 @@ public class DatabaseInitializer implements CommandLineRunner {
         // Phase 4 P-B：应用菜单上报凭据（X-Client-Secret）；NULL=该应用未启用 internal 上报通道
         addColumnIfNotExists("sys_app_client", "client_secret",
                 "ALTER TABLE sys_app_client ADD COLUMN client_secret VARCHAR(128) NULL COMMENT '应用上报凭据(X-Client-Secret)；NULL=未启用internal上报'");
+        // §31 默认最小权限：菜单「已登录即可见」标记（应用 menu-registry.yml 的 public: true）。
+        // 存量行默认 0 = 非 public，即「默认不可见、须显式授权」——安全默认姿态。
+        addColumnIfNotExists("sys_permission", "is_public",
+                "ALTER TABLE sys_permission ADD COLUMN is_public TINYINT NOT NULL DEFAULT 0 "
+                + "COMMENT '1=公开菜单(已登录即可见，strict 默认最小权限下仍授予) 0=须显式授权'");
+        // §31 一次性收敛标记：避免每次重启都把管理员手工补的授权再摘一遍
+        addColumnIfNotExists("sys_app_client", "strict_migrated",
+                "ALTER TABLE sys_app_client ADD COLUMN strict_migrated TINYINT NOT NULL DEFAULT 0 "
+                + "COMMENT '1=已执行 strict 默认最小权限收敛（一次性）'");
 
         // 存量数据迁移：user.email/phone/wechat_openid -> user_identity（幂等，可重复执行）
         migrateUserIdentities();
@@ -325,13 +334,19 @@ public class DatabaseInitializer implements CommandLineRunner {
         // （apps-registry.yml 派生），原 seedOidcClient + 5 个 seedXxx 硬编码方法已删除
         ensureAdminRole();
         seedRbacBase();
-        // Phase 7：默认授权种子——对零绑定的应用把全部 menu 权限点绑到平台 user 角色，
-        // 使 configured=true（菜单过滤真正接管）而普通用户默认仍全可见（零锁死、零回归）。
+        // §31.4：superadmin 显式落库（scope=platform, client_id IS NULL）+ 存量超管用户绑定。
+        // 改造前 sys_role 里根本没有这一行，superadmin 只活在硬编码字符串里，
+        // sys_user_role 查不到痕迹 → 审计不可信。
+        seedSuperadminRole();
+        // Phase 7：默认授权种子——按生效模式补发（strict=仅 public 菜单 / legacy=全量 menu）。
         permissionService.syncDefaultGrantsForAllClients();
         // Phase 8：为每个应用补齐**默认 client 级角色**（admin「应用管理员」/ user「普通用户」）
         // + 角色→权限绑定 + 平台用户默认绑定——使应用侧「本系统用户」、跨应用授权矩阵、
         // 「角色与菜单授权」面板**开箱可用**（幂等；仅在该角色/该应用零绑定时播种，不覆盖人工配置）。
         permissionService.seedDefaultClientRoles();
+        // §31.2：strict 收敛——摘除默认角色上的非 public 权限绑定（含 kbops api hosts:create）。
+        // 必须排在角色种子之后（先有 client 级 user 角色，才谈得上收敛它的绑定）。
+        permissionService.enforceStrictForAllClients();
 
         createTableIfNotExists("sys_error_log", """
             CREATE TABLE IF NOT EXISTS sys_error_log (
@@ -409,6 +424,42 @@ public class DatabaseInitializer implements CommandLineRunner {
             }
         } catch (Exception e) {
             log.warn("admin 角色引导失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * superadmin 角色落库（幂等，§31.5）。
+     *
+     * <h3>为什么必须落这一行</h3>
+     * 改造前 {@code sys_role} 表里 <b>没有 superadmin 这个 code</b>（只有 admin / user），
+     * 它只以硬编码字符串存在于 UserDetailsServiceImpl、PermissionService、UserServiceImpl。
+     * 后果有二：
+     * <ol>
+     *   <li>角色解析按 code 全域匹配时，任一应用建一个 {@code superadmin} 角色即全域提权；</li>
+     *   <li>{@code sys_user_role} 里查不到任何 superadmin 绑定 —— 「谁是超管」在授权审计里
+     *      完全不可见，出问题无法追溯。</li>
+     * </ol>
+     * 落库后：角色必须真实存在才能被 {@code roleIdsByCodes(scope='platform')} 解析，
+     * 且超管用户在 {@code sys_user_role} 有据可查。
+     */
+    private void seedSuperadminRole() {
+        try {
+            jdbcTemplate.update("""
+                INSERT INTO sys_role (scope, client_id, code, name, description)
+                SELECT 'platform', NULL, 'superadmin', '超级管理员',
+                       '平台超级管理员（跨应用全权，不可降级/禁用/删除；审计可见）'
+                WHERE NOT EXISTS (SELECT 1 FROM sys_role WHERE scope='platform' AND code='superadmin')
+                """);
+            int bound = jdbcTemplate.update("""
+                INSERT INTO sys_user_role (user_id, role_id, client_id, granted_by)
+                SELECT u.id, r.id, NULL, NULL FROM user u
+                JOIN sys_role r ON r.scope='platform' AND r.client_id IS NULL AND r.code='superadmin'
+                WHERE u.role='superadmin' AND u.deleted=0
+                  AND NOT EXISTS (SELECT 1 FROM sys_user_role ur WHERE ur.user_id=u.id AND ur.role_id=r.id)
+                """);
+            log.info("superadmin 平台角色就绪：新增用户绑定 {} 条", bound);
+        } catch (Exception e) {
+            log.warn("superadmin 角色落库失败: {}", e.getMessage());
         }
     }
 

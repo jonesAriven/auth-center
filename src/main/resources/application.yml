@@ -60,6 +60,14 @@ jwt:
 marschat:
   auth:
     issuer: ${AUTH_ISSUER:http://auth-center:8085}
+  # ── 授权默认策略（§31 默认最小权限重构） ────────────────────────────────────
+  # strict（默认）：平台 user/admin、应用 user 角色只持有 public 菜单；
+  #                其余 menu/api 必须由应用角色显式授权；api 永不自动授予。
+  # legacy：恢复改造前「默认全量菜单」行为，一键回滚用（MARSCHAT_AUTHZ_MODE=legacy）。
+  # 灰度：全局 legacy 时，只有 strict-clients 列出的应用走 strict（先在 portal 验证）。
+  authz:
+    mode: ${MARSCHAT_AUTHZ_MODE:strict}
+    strict-clients: ${MARSCHAT_AUTHZ_STRICT_CLIENTS:}
 
 # AES-256-GCM 加密密钥（32字节 Base64），用于 API Token 加密存储
 crypto:
