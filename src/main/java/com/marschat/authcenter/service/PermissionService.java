@@ -408,8 +408,9 @@ public class PermissionService {
     /** 角色已绑权限全码集合（client:type:code，授权界面回显）。 */
     public Set<String> rolePermissionCodes(long roleId) {
         try {
+            // ⚠️ MySQL 默认模式下 || 是逻辑或不是拼接——必须用 CONCAT()
             return new HashSet<>(jdbcTemplate.queryForList("""
-                    SELECT p.client_id || ':' || p.type || ':' || p.code
+                    SELECT CONCAT(p.client_id, ':', p.type, ':', p.code)
                     FROM sys_role_permission rp JOIN sys_permission p ON p.id = rp.permission_id
                     WHERE rp.role_id=?
                     """, String.class, roleId));
