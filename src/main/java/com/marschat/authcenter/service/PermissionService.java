@@ -761,12 +761,17 @@ public class PermissionService {
                 + bindRolePermsIfEmpty(clientId, "user", List.of("menu"));
 
         int userBinds = 0;
+        // ① 应用管理员 ← 平台 superadmin/admin：按 **(client, role) 判空**独立播种。
+        //    语义上「超管就是每个系统的管理员」是恒定真值，且超管本就绕过 RBAC、增删皆无副作用，
+        //    故不受下面「应用零绑定」护栏限制——否则像 kb-ops 这种已有 ops-viewer 绑定的应用
+        //    会被整体跳过，导致它的「应用管理员」角色无人绑定（实测踩中）。
+        userBinds += grantPlatformUsers(clientId, "admin", List.of("superadmin", "admin"), true);
+        // ② 普通用户 ← 平台普通用户：受「该应用零 client 级用户绑定」护栏，不覆盖人工增删。
         Integer existingUserBindings = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
                         + "WHERE r.scope='client' AND r.client_id=?", Integer.class, clientId);
         if (existingUserBindings == null || existingUserBindings == 0) {
-            userBinds += grantPlatformUsers(clientId, "admin", List.of("superadmin", "admin"));
-            userBinds += grantPlatformUsers(clientId, "user", List.of("user"));
+            userBinds += grantPlatformUsers(clientId, "user", List.of("user"), false);
         }
         return Map.of("roles", roles, "permissionBindings", permBinds, "userBindings", userBinds);
     }
@@ -816,8 +821,23 @@ public class PermissionService {
                 args.toArray());
     }
 
-    /** 把「平台角色属于 platformRoles 的活跃用户」绑定到某应用的 client 级角色（幂等） */
-    private int grantPlatformUsers(String clientId, String clientRoleCode, List<String> platformRoles) {
+    /**
+     * 把「平台角色属于 platformRoles 的活跃用户」绑定到某应用的 client 级角色（幂等）。
+     *
+     * @param onlyIfRoleEmpty {@code true} = 仅当该 (应用, 角色) 当前**零绑定**时才播种
+     *                        （用于「应用管理员」这类应恒有绑定的角色，避免人工清空后被反复重加）
+     */
+    private int grantPlatformUsers(String clientId, String clientRoleCode, List<String> platformRoles,
+                                   boolean onlyIfRoleEmpty) {
+        if (onlyIfRoleEmpty) {
+            Integer cnt = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                            + "WHERE r.scope='client' AND r.client_id=? AND r.code=?",
+                    Integer.class, clientId, clientRoleCode);
+            if (cnt != null && cnt > 0) {
+                return 0;
+            }
+        }
         String ph = platformRoles.stream().map(x -> "?").collect(Collectors.joining(","));
         List<Object> args = new ArrayList<>();
         args.add(clientId);   // SELECT 里的 client_id
