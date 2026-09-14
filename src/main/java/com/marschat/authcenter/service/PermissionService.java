@@ -41,6 +41,9 @@ public class PermissionService {
 
     private final JdbcTemplate jdbcTemplate;
 
+    /** 操作审计（Phase 8：应用级角色绑定/移出必须留痕） */
+    private final OperationLogService operationLogService;
+
     /** 单次 composite 展开深度上限（防环）。 */
     private static final int MAX_DEPTH = 8;
 
@@ -287,6 +290,8 @@ public class PermissionService {
         // 上报后补默认授权：使 configured=true（过滤机制接管）而普通用户默认仍全可见（零锁死）。
         // force=false → 仅当该应用当前零绑定时补种，已人工收窄的应用不会被覆盖。
         ensureDefaultGrants(clientId, false);
+        // 新接入应用上报完菜单即拥有默认 client 级角色（admin/user），无需等 auth-center 重启
+        seedDefaultClientRolesFor(clientId);
         log.info("菜单上报完成: {} upsert={} retired={}", clientId, upserted, retired);
         return Map.of("upserted", upserted, "retired", retired);
     }
@@ -528,7 +533,7 @@ public class PermissionService {
      * 超管判定走 user.role/平台角色，此处只管 client 级绑定）。
      */
     @org.springframework.transaction.annotation.Transactional
-    public int assignUserClientRoles(long userId, String clientId, Set<Long> roleIds) {
+    public int assignUserClientRoles(long userId, String clientId, Set<Long> roleIds, Long operatorId) {
         for (Long rid : roleIds) {
             Map<String, Object> r = jdbcTemplate.queryForMap(
                     "SELECT scope, client_id FROM sys_role WHERE id=?", rid);
@@ -536,6 +541,8 @@ public class PermissionService {
                 throw new IllegalArgumentException("角色 " + rid + " 不属于应用 " + clientId);
             }
         }
+        // 审计要「变更前 → 变更后」对比，故先取一次旧值
+        String before = clientRoleCodeList(userId, clientId);
         jdbcTemplate.update(
                 "DELETE ur FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
                 + "WHERE ur.user_id=? AND r.scope='client' AND r.client_id=?", userId, clientId);
@@ -544,8 +551,48 @@ public class PermissionService {
                     "INSERT INTO sys_user_role (user_id, role_id, client_id) VALUES (?, ?, ?)",
                     userId, rid, clientId);
         }
+        String after = clientRoleCodeList(userId, clientId);
         log.info("用户应用角色绑定完成: user={} client={} bound={}", userId, clientId, roleIds.size());
+
+        // 🔴 审计（2026-09-14 良哥要求）：**三条路径共用这一个端点**——
+        //    ① 应用侧「移出本系统」（roleIds 为空）② 中心「跨应用授权」矩阵单元格改绑
+        //    ③ 应用侧「添加已有用户」。故在此统一留痕，覆盖全部。
+        if (operatorId != null) {
+            boolean removed = roleIds.isEmpty();
+            String who = usernameOf(userId);
+            String detail = (removed
+                    ? "将用户 " + who + " 移出应用 " + clientId + "（清空全部角色，统一身份保留）"
+                    : "设置用户 " + who + " 在应用 " + clientId + " 的角色")
+                    + "；变更前: " + (before.isEmpty() ? "无" : before)
+                    + " → 变更后: " + (after.isEmpty() ? "无" : after);
+            operationLogService.log(operatorId, usernameOf(operatorId),
+                    removed ? "user.remove_from_app" : "user.client_roles",
+                    "user", userId, detail, null);
+        }
         return roleIds.size();
+    }
+
+    /** 某用户在某应用的角色 code 列表（逗号分隔，按 code 排序，稳定可比对） */
+    private String clientRoleCodeList(long userId, String clientId) {
+        List<String> codes = jdbcTemplate.queryForList(
+                "SELECT r.code FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                        + "WHERE ur.user_id=? AND r.scope='client' AND r.client_id=? ORDER BY r.code",
+                String.class, userId, clientId);
+        return String.join(",", codes);
+    }
+
+    /** 按 id 取用户名（审计文案用；查不到回退 id 串，不抛异常） */
+    private String usernameOf(Long userId) {
+        if (userId == null) {
+            return null;
+        }
+        try {
+            String name = jdbcTemplate.queryForObject(
+                    "SELECT username FROM user WHERE id=?", String.class, userId);
+            return name == null ? String.valueOf(userId) : name;
+        } catch (Exception e) {
+            return String.valueOf(userId);
+        }
     }
 
     // ═════════════════ 默认授权种子（Phase 7 · 权限统一管理「生效」） ═════════════════
@@ -627,5 +674,164 @@ public class PermissionService {
         } catch (Exception e) {
             log.warn("默认授权种子批量补种失败: {}", e.getMessage());
         }
+    }
+
+    // ═════════════ 默认应用角色种子（Phase 8 收尾） ═════════════
+
+    /**
+     * 为全部启用中的应用补齐「默认 client 级角色」并落实默认绑定（幂等）。
+     *
+     * <h3>为什么需要它</h3>
+     * Phase 8 上线后应用侧「本系统用户」几乎是空的——库里**只有 1 个 client 级角色**
+     * （`marschat-kbops/ops-viewer`），没有任何应用有自己的角色体系。后果：
+     * ① 「添加已有用户」没有默认可授角色（组件会直接中止并提示）；
+     * ② 跨应用授权矩阵单元格点开是空列表；
+     * ③ 「角色与菜单授权」面板无角色可配。数据是对的，但**不可用**。
+     *
+     * <h3>播种范围</h3>
+     * 只给**真正接入统一认证平台的应用**播种 —— 判据是「已上报菜单权限点」**或**「已上报账号映射」，
+     * 即 6 个自研应用（含无菜单但上报账号的 activecode）。
+     * 第三方 client（memory / tokenhub / frp-manager / p3-probe…）两者皆无，
+     * 给它们建角色只会污染授权矩阵与角色列表。
+     *
+     * <h3>播种内容（每个应用两个角色）</h3>
+     * <ul>
+     *   <li><b>admin「应用管理员」</b> ← 该应用**全部** menu + api 权限点；</li>
+     *   <li><b>user「普通用户」</b>  ← 该应用**全部 menu** 权限点
+     *       （api 不给，与平台默认授权种子同一安全姿态：菜单=可见性默认给，接口=动作默认拒）。</li>
+     * </ul>
+     * 并默认绑定：平台 {@code superadmin}/{@code admin} → 各应用 admin 角色；
+     * 平台 {@code user} → 各应用 user 角色。这把当前「任何 auth-center 用户都能进任何应用」
+     * 的 R10 现状**显式化**（行为零变化），但让授权矩阵与各应用用户列表**立刻可读、可管理**。
+     *
+     * <h3>绝不覆盖人工配置（沿用 {@link #ensureDefaultGrants} 的 force=false 语义）</h3>
+     * 角色→权限绑定：仅当该角色**当前零权限绑定**时播种；
+     * 用户→角色绑定：仅当该应用**当前零 client 级用户绑定**时播种。
+     * 管理员一旦在某应用上做过增删，重启不会再插手。
+     *
+     * @return 明细（启动日志用）
+     */
+    public Map<String, Object> seedDefaultClientRoles() {
+        int roles = 0;
+        int permBinds = 0;
+        int userBinds = 0;
+        List<String> clients;
+        try {
+            clients = jdbcTemplate.queryForList(
+                    "SELECT c.client_id FROM sys_app_client c WHERE c.status=1 "
+                            + "  AND (EXISTS (SELECT 1 FROM sys_permission p "
+                            + "               WHERE p.client_id = c.client_id AND p.status = 1) "
+                            + "       OR EXISTS (SELECT 1 FROM app_account_mapping m "
+                            + "                  WHERE m.client_id = c.client_id AND m.status = 1))",
+                    String.class);
+        } catch (Exception e) {
+            log.warn("默认应用角色种子跳过: {}", e.getMessage());
+            return Map.of("clients", 0, "roles", 0, "permissionBindings", 0, "userBindings", 0);
+        }
+        for (String c : clients) {
+            try {
+                Map<String, Object> r = seedDefaultClientRolesFor(c);
+                roles += (int) r.get("roles");
+                permBinds += (int) r.get("permissionBindings");
+                userBinds += (int) r.get("userBindings");
+            } catch (Exception e) {
+                log.warn("默认应用角色种子失败（跳过 {}）: {}", c, e.getMessage());
+            }
+        }
+        if (roles + permBinds + userBinds > 0) {
+            log.info("默认应用角色种子: 新增角色 {} / 角色权限绑定 {} / 用户绑定 {}（应用 {} 个）",
+                    roles, permBinds, userBinds, clients.size());
+        }
+        return Map.of("clients", clients.size(), "roles", roles,
+                "permissionBindings", permBinds, "userBindings", userBinds);
+    }
+
+    /**
+     * 单个应用的默认角色种子。
+     *
+     * <p>除启动时批量播种外，**菜单上报后也会调用**（{@code reportMenus}）——
+     * 这样新接入的应用上报完菜单即刻拥有两个可用角色，无需等下一次 auth-center 重启。
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public Map<String, Object> seedDefaultClientRolesFor(String clientId) {
+        int roles = ensureClientRoleExists(clientId, "admin", "应用管理员")
+                + ensureClientRoleExists(clientId, "user", "普通用户");
+
+        int permBinds = bindRolePermsIfEmpty(clientId, "admin", List.of("menu", "api"))
+                + bindRolePermsIfEmpty(clientId, "user", List.of("menu"));
+
+        int userBinds = 0;
+        Integer existingUserBindings = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM sys_user_role ur JOIN sys_role r ON r.id = ur.role_id "
+                        + "WHERE r.scope='client' AND r.client_id=?", Integer.class, clientId);
+        if (existingUserBindings == null || existingUserBindings == 0) {
+            userBinds += grantPlatformUsers(clientId, "admin", List.of("superadmin", "admin"));
+            userBinds += grantPlatformUsers(clientId, "user", List.of("user"));
+        }
+        return Map.of("roles", roles, "permissionBindings", permBinds, "userBindings", userBinds);
+    }
+
+    /** 确保某应用下存在指定 code 的 client 级角色；已存在返回 0（幂等） */
+    private int ensureClientRoleExists(String clientId, String code, String name) {
+        Integer cnt = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM sys_role WHERE scope='client' AND client_id=? AND code=?",
+                Integer.class, clientId, code);
+        if (cnt != null && cnt > 0) {
+            return 0;
+        }
+        jdbcTemplate.update(
+                "INSERT INTO sys_role (scope, client_id, code, name) VALUES ('client', ?, ?, ?)",
+                clientId, code, name);
+        return 1;
+    }
+
+    /**
+     * 把某应用的**全部有效权限点**（限定 type）绑定到该应用的某角色。
+     *
+     * <p>⚠️ 该角色**当前已有任意权限绑定**时直接返回 0 —— 这是「不覆盖人工收窄」的护栏
+     * （与 {@link #ensureDefaultGrants} 的 force=false 同一取舍）。
+     * 注意判据是**按角色**而非按 type：否则先绑 menu 再绑 api 时第二次会被自己的第一条挡住。
+     */
+    private int bindRolePermsIfEmpty(String clientId, String roleCode, List<String> types) {
+        Integer cnt = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_role r ON r.id = rp.role_id "
+                        + "WHERE r.scope='client' AND r.client_id=? AND r.code=?",
+                Integer.class, clientId, roleCode);
+        if (cnt != null && cnt > 0) {
+            return 0;
+        }
+        String ph = types.stream().map(t -> "?").collect(Collectors.joining(","));
+        List<Object> args = new ArrayList<>();
+        args.add(clientId);
+        args.add(roleCode);
+        args.addAll(types);
+        return jdbcTemplate.update(
+                "INSERT INTO sys_role_permission (role_id, permission_id) "
+                        + "SELECT r.id, p.id FROM sys_role r "
+                        + "JOIN sys_permission p ON p.client_id = r.client_id "
+                        + "WHERE r.scope='client' AND r.client_id=? AND r.code=? "
+                        + "  AND p.type IN (" + ph + ") AND p.status=1 "
+                        + "  AND NOT EXISTS (SELECT 1 FROM sys_role_permission rp "
+                        + "                  WHERE rp.role_id=r.id AND rp.permission_id=p.id)",
+                args.toArray());
+    }
+
+    /** 把「平台角色属于 platformRoles 的活跃用户」绑定到某应用的 client 级角色（幂等） */
+    private int grantPlatformUsers(String clientId, String clientRoleCode, List<String> platformRoles) {
+        String ph = platformRoles.stream().map(x -> "?").collect(Collectors.joining(","));
+        List<Object> args = new ArrayList<>();
+        args.add(clientId);   // SELECT 里的 client_id
+        args.add(clientId);   // JOIN 条件
+        args.add(clientRoleCode);
+        args.addAll(platformRoles);
+        args.add(clientId);   // NOT EXISTS 条件
+        return jdbcTemplate.update(
+                "INSERT INTO sys_user_role (user_id, role_id, client_id) "
+                        + "SELECT u.id, r.id, ? FROM user u "
+                        + "JOIN sys_role r ON r.scope='client' AND r.client_id=? AND r.code=? "
+                        + "WHERE u.deleted=0 AND u.status=1 AND u.role IN (" + ph + ") "
+                        + "  AND NOT EXISTS (SELECT 1 FROM sys_user_role ur "
+                        + "                  WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.client_id=?)",
+                args.toArray());
     }
 }

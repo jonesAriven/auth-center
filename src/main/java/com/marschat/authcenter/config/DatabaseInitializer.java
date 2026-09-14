@@ -328,6 +328,10 @@ public class DatabaseInitializer implements CommandLineRunner {
         // Phase 7：默认授权种子——对零绑定的应用把全部 menu 权限点绑到平台 user 角色，
         // 使 configured=true（菜单过滤真正接管）而普通用户默认仍全可见（零锁死、零回归）。
         permissionService.syncDefaultGrantsForAllClients();
+        // Phase 8：为每个应用补齐**默认 client 级角色**（admin「应用管理员」/ user「普通用户」）
+        // + 角色→权限绑定 + 平台用户默认绑定——使应用侧「本系统用户」、跨应用授权矩阵、
+        // 「角色与菜单授权」面板**开箱可用**（幂等；仅在该角色/该应用零绑定时播种，不覆盖人工配置）。
+        permissionService.seedDefaultClientRoles();
 
         createTableIfNotExists("sys_error_log", """
             CREATE TABLE IF NOT EXISTS sys_error_log (

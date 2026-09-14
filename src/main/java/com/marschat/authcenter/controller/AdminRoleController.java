@@ -1,6 +1,7 @@
 package com.marschat.authcenter.controller;
 
 import com.marschat.authcenter.service.PermissionService;
+import com.marschat.authcenter.util.SecurityUtils;
 import com.marschat.common.result.Result;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -84,7 +85,13 @@ public class AdminRoleController {
         return Result.ok(permissionService.userClientRoleIds(userId, client));
     }
 
-    /** 用户在某应用的角色绑定全量覆盖。body: {"roleIds": [10, 11]} */
+    /**
+     * 用户在某应用的角色绑定**全量覆盖**。body: {"roleIds": [10, 11]}
+     *
+     * <p>{@code roleIds} 为空 = **「移出本系统」**（清空该用户在本应用的全部角色，统一身份保留）。
+     * 该端点被三条路径共用：应用侧「移出本系统」/ 应用侧「添加已有用户」/ 中心「跨应用授权」矩阵改绑，
+     * 故审计在 service 层统一留痕（action = {@code user.remove_from_app} 或 {@code user.client_roles}）。
+     */
     @PutMapping("/users/{userId}/client-roles")
     public Result<?> assignUserClientRoles(@PathVariable long userId, @RequestParam String client,
                                            @RequestBody AssignRolesRequest body) {
@@ -92,8 +99,8 @@ public class AdminRoleController {
             return Result.fail(400, "缺少 roleIds");
         }
         try {
-            return Result.ok(Map.of("bound",
-                    permissionService.assignUserClientRoles(userId, client, body.getRoleIds())));
+            return Result.ok(Map.of("bound", permissionService.assignUserClientRoles(
+                    userId, client, body.getRoleIds(), SecurityUtils.getCurrentUserId())));
         } catch (IllegalArgumentException e) {
             return Result.fail(400, e.getMessage());
         }
