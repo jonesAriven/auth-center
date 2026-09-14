@@ -54,22 +54,10 @@ public class DatabaseInitializer implements CommandLineRunner {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='操作日志表'
             """);
 
-        createTableIfNotExists("api_token", """
-            CREATE TABLE IF NOT EXISTS api_token (
-                id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                user_id BIGINT NOT NULL COMMENT '用户ID',
-                name VARCHAR(100) COMMENT '令牌名称',
-                token VARCHAR(255) NOT NULL COMMENT '令牌值',
-                expires_at DATETIME COMMENT '过期时间',
-                last_used_at DATETIME COMMENT '最后使用时间',
-                status INT DEFAULT 1 COMMENT '状态 1-启用 0-禁用',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                deleted INT DEFAULT 0,
-                UNIQUE INDEX uk_token (token),
-                INDEX idx_user_id (user_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='API令牌表'
-            """);
+        // ⚠️ 2026-09-14 已删除死表创建：`api_token`。
+        // 实体 ApiToken 的 @TableName 是 `ops_api_token`（实际在用，2 行），本处早先又建了一张
+        // 同语义的 `api_token`，全表 0 行、无任何代码读写 —— 双表并存只会误导后续维护，
+        // 故移除建表语句并由下方 dropObsoleteTableIfEmpty 幂等清理历史库中的孤儿表。
 
         createTableIfNotExists("jwt_blacklist", """
             CREATE TABLE IF NOT EXISTS jwt_blacklist (
@@ -132,16 +120,11 @@ public class DatabaseInitializer implements CommandLineRunner {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户身份表'
             """);
 
-        // 新增表：用户凭证表（password 暂不迁移，本表仅建结构，user.password 继续生效）
-        createTableIfNotExists("user_credential", """
-            CREATE TABLE IF NOT EXISTS user_credential (
-                user_id BIGINT NOT NULL COMMENT '用户ID',
-                type VARCHAR(32) NOT NULL COMMENT '凭证类型 password/oauth',
-                secret VARCHAR(255) COMMENT '凭证密钥(加密存储)',
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                UNIQUE INDEX uk_user_type (user_id, type)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='用户凭证表'
-            """);
+        // ⚠️ 2026-09-14 已删除死表创建：`user_credential`。
+        // 当初设计为「把 user.password 拆分出来（type=password/oauth）」，但迁移从未发生，
+        // 建表至今全表 0 行、无实体/无 Mapper/无读写 —— 密码仍存 `user.password`（bcrypt）。
+        // 保留一张永不使用的表会把"认证凭据到底在哪"这件事搞混，故移除并由
+        // dropObsoleteTableIfEmpty 幂等清理历史库。
 
         // ============ Phase 2 · RBAC 六表（unified-auth 方案 §3.2 权威 schema） ============
         createTableIfNotExists("sys_role", """
@@ -267,6 +250,9 @@ public class DatabaseInitializer implements CommandLineRunner {
 
         // 存量数据迁移：user.email/phone/wechat_openid -> user_identity（幂等，可重复执行）
         migrateUserIdentities();
+
+        // 死表清理（幂等 + 安全护栏）：见方法注释
+        cleanupObsoleteTables();
 
         // Spring Authorization Server JDBC 表（官方 schema）
         createTableIfNotExists("oauth2_registered_client", """
@@ -465,6 +451,41 @@ public class DatabaseInitializer implements CommandLineRunner {
             log.info("RBAC 基础种子完成（平台角色/绑定/应用注册表）");
         } catch (Exception e) {
             log.warn("RBAC 种子失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 清理已废弃的孤儿表（幂等）。
+     *
+     * <p>安全护栏：**仅当表存在且行数为 0 时才 DROP**；一旦发现表里有数据（说明有人真在用，
+     * 与「死表」判断相悖）只打印 WARN 并跳过，绝不静默删数据。
+     *
+     * <p>本批清理：
+     * <ul>
+     *   <li>{@code api_token} —— 与实体实际使用的 {@code ops_api_token} 重复，0 行；</li>
+     *   <li>{@code user_credential} —— 从未迁移的密码拆分表，0 行。</li>
+     * </ul>
+     */
+    private void cleanupObsoleteTables() {
+        for (String table : new String[]{"api_token", "user_credential"}) {
+            try {
+                Integer exists = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+                        + "AND TABLE_NAME = ?", Integer.class, table);
+                if (exists == null || exists == 0) {
+                    continue;
+                }
+                Long rows = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM `" + table + "`", Long.class);
+                if (rows != null && rows > 0) {
+                    log.warn("死表 {} 仍有 {} 行数据，跳过 DROP（需人工确认）", table, rows);
+                    continue;
+                }
+                jdbcTemplate.execute("DROP TABLE IF EXISTS `" + table + "`");
+                log.info("已清理废弃空表 {}", table);
+            } catch (Exception e) {
+                log.warn("清理废弃表 {} 失败: {}", table, e.getMessage());
+            }
         }
     }
 
