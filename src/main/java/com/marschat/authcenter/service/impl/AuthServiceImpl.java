@@ -2,6 +2,8 @@ package com.marschat.authcenter.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.marschat.authcenter.dto.LoginRequest;
 import com.marschat.authcenter.dto.LoginResponse;
 import com.marschat.authcenter.dto.RefreshRequest;
@@ -51,7 +53,27 @@ public class AuthServiceImpl implements AuthService {
     private static final String BIZ_RESET_PASSWORD = "RESET_PASSWORD";
 
     private static final String EVENT_CHANNEL = "kb:events";
-    private static final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * 事件序列化器。
+     *
+     * <p>🔴 2026-09-15 修复（实测线上）：原为裸 {@code new ObjectMapper()} —— 未注册
+     * {@link JavaTimeModule}，而 {@code AppEvent.timestamp} 是 {@link java.time.Instant}，
+     * 序列化时抛
+     * {@code Java 8 date/time type java.time.Instant not supported by default:
+     * add Module "com.fasterxml.jackson.datatype:jackson-datatype-jsr310"}。
+     * 后果：**登录/登出/改密事件全部静默丢失**（异常被 catch 成 WARN 日志，
+     * 调用方毫无感知），只在 auth-center 日志里留下一行 `发布事件失败`。
+     * 表现为「登录成功但事件总线没有这条事件」——审计/埋点链路凭空缺数据。
+     *
+     * <p>注意：Spring 容器里的 {@code ObjectMapper} 由 Boot 自动装配（自带 JSR310），
+     * 但本类是 {@code static final} 自建实例，**不会**继承任何自动装配，
+     * 必须显式注册模块。凡「自建 ObjectMapper 序列化带时间类型的对象」都要照此办理。
+     */
+    private static final ObjectMapper objectMapper = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            // 禁止把时间写成 epoch 数字，保持与既有 JSON 事件消费者（如 kb-gateway 日志链路）兼容
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
 
     @Override
     @Transactional
