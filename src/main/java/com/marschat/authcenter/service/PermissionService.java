@@ -1000,8 +1000,14 @@ public class PermissionService {
         // 应用「管理员」角色仍持有本应用全量 menu+api —— 应用管理员对自己应用全权是设计意图，
         // 也是超管/平台管理员进各应用管理台的通路（实测 admin 账号靠它保持不受影响）。
         boolean strict = authzPolicy.isStrict(clientId);
-        int permBinds = bindRolePermsIfEmpty(clientId, "admin", List.of("menu", "api"), false)
-                + bindRolePermsIfEmpty(clientId, "user", List.of("menu"), strict);
+        // 应用管理员：**加法补齐**（forceTopUp=true）而非「零绑定时才播种」。
+        //   理由（2026-09-15 实测踩中）：应用先上报 menu（admin 角色得到 N 条 menu 绑定），
+        //   之后才上报 api 权限点（如 cosmic 的 11 个 api、infra 的 7 个 api）时，
+        //   「已有绑定即跳过」的护栏会让 admin 角色**永远拿不到后补的 api 点** →
+        //   该应用管理员走 SSO（中心身份非超管）时写接口 403，而菜单看着正常，属静默失效。
+        //   「应用管理员对自己应用全权」是明示设计意图（非可调项），故按全量 menu+api 补齐（幂等）。
+        int permBinds = bindRolePermsIfEmpty(clientId, "admin", List.of("menu", "api"), false, true)
+                + bindRolePermsIfEmpty(clientId, "user", List.of("menu"), strict, false);
 
         int userBinds = 0;
         // ① 应用管理员 ← 平台 superadmin/admin：按 **(client, role) 判空**独立播种。
@@ -1042,15 +1048,20 @@ public class PermissionService {
      * 注意判据是**按角色**而非按 type：否则先绑 menu 再绑 api 时第二次会被自己的第一条挡住。
      *
      * @param publicOnly strict 下为 true：只绑 {@code public} 菜单（默认最小权限）
+     * @param forceTopUp {@code true} = 跳过「零绑定」护栏，按 {@code NOT EXISTS} 条件**加法补齐**
+     *                   缺失的绑定（幂等）；用于「应用管理员 = 本应用全量 menu+api」这类恒定真值。
+     *                   注意它只会**新增缺失项**，不会删除人工移除的绑定，也不会覆盖其它角色。
      */
     private int bindRolePermsIfEmpty(String clientId, String roleCode, List<String> types,
-                                     boolean publicOnly) {
-        Integer cnt = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_role r ON r.id = rp.role_id "
-                        + "WHERE r.scope='client' AND r.client_id=? AND r.code=?",
-                Integer.class, clientId, roleCode);
-        if (cnt != null && cnt > 0) {
-            return 0;
+                                     boolean publicOnly, boolean forceTopUp) {
+        if (!forceTopUp) {
+            Integer cnt = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM sys_role_permission rp JOIN sys_role r ON r.id = rp.role_id "
+                            + "WHERE r.scope='client' AND r.client_id=? AND r.code=?",
+                    Integer.class, clientId, roleCode);
+            if (cnt != null && cnt > 0) {
+                return 0;
+            }
         }
         String ph = types.stream().map(t -> "?").collect(Collectors.joining(","));
         List<Object> args = new ArrayList<>();
