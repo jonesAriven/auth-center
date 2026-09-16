@@ -92,6 +92,7 @@ clients:
   - client-id: cosmic-studio
     name: MarsChat COSMIC Studio
     type: public
+    menu-report-secret: ${COSMIC_MENU_REPORT_SECRET:}
     scopes: ["openid", "profile"]
     grant-types: ["authorization_code", "refresh_token"]
     access-token-ttl-minutes: 30

@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -52,6 +53,17 @@ public class PermissionService {
     /** 单次 composite 展开深度上限（防环）。 */
     private static final int MAX_DEPTH = 8;
 
+    /**
+     * 「应用管理员」判定所用的权限点（{@code sys_permission} 内 {@code type=api, code=admin:write}）。
+     *
+     * <p>全码形式为 {@code {clientId}:api:admin:write} —— 与 cosmic BFF
+     * {@code require_permission("api:admin:write", min_role="admin")} 是**同一权限点**，
+     * 只是此处补上了 client 前缀（{@code computeForUser} 的下发口径）。
+     * 同一权限点两处消费（业务写接口的 {@code PermissionAuthzFilter} + 管理面的
+     * {@code AppAuthzEvaluator}），是设计一致的，不是重复（见设计规格 §1.6）。
+     */
+    private static final String APP_ADMIN_PERM_SUFFIX = ":api:admin:write";
+
     public Map<String, Object> computeForUser(long userId, String clientId) {
         Set<String> platformRoles = platformRoles(userId);
         Set<String> clientRoleCodes = clientRoleCodes(userId, clientId);
@@ -85,6 +97,51 @@ public class PermissionService {
         out.put("authzMode", authzPolicy.isStrict(clientId)
                 ? AuthzProperties.MODE_STRICT : AuthzProperties.MODE_LEGACY);
         return out;
+    }
+
+    /**
+     * 判断用户是否为某应用的「应用管理员」（三层权限 API · Membership 层判据）。
+     *
+     * <p><b>口径 A（推荐、复用已有权限点）</b>：该用户在该 client 下持有
+     * {@code api:admin:write} 权限点。原料复用 {@link #computeForUser(long, String)}
+     * 返回的 {@code permissions} 集合（全码形式 {@code clientId:type:code}，
+     * 本判据即 {@code clientId:api:admin:write}）。
+     *
+     * <p><b>fail-closed（管理面）</b>：任何异常一律返回 {@code false} 并记 WARN ——
+     * 判定失败时**不授予**应用管理权限（宁可拒绝）。本方法只在 {@code @PreAuthorize}
+     * 的 {@code /admin/**} 鉴权面被调用，**不在** {@code /auth/login}、{@code /auth/refresh}、
+     * {@code /auth/mail-login} 登录主链路上：auth-center 是 SSO 枢纽，登录 500 = 全站不可用，
+     * 故此判定**绝不**向登录链路引入新的硬依赖。
+     *
+     * <p>注意与 {@code computeForUser} 一致：本方法为只读查询，可能触发 DB 访问；
+     * 即使 DB/Redis 不可用，也只影响管理面判定的结果（拒绝），不影响登录与刷新。
+     *
+     * @param userId   调用者用户 id
+     * @param clientId 目标应用标识（须来自 URL path，见 {@code AdminClientMemberController}）
+     * @return true = 该用户是本应用的「应用管理员」
+     */
+    public boolean isAppAdmin(long userId, String clientId) {
+        if (clientId == null || clientId.isBlank()) {
+            return false;
+        }
+        try {
+            Map<String, Object> computed = computeForUser(userId, clientId);
+            Object perms = computed == null ? null : computed.get("permissions");
+            if (!(perms instanceof Collection<?> coll)) {
+                return false;
+            }
+            String adminFullCode = clientId + APP_ADMIN_PERM_SUFFIX;
+            for (Object p : coll) {
+                if (adminFullCode.equals(String.valueOf(p))) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            log.warn("应用管理员判定失败（fail-closed）: user={} client={} err={}",
+                    userId, clientId, e.getMessage());
+            return false;
+        }
     }
 
     /** 用户在某应用的 menu 覆盖排除集（下发的全码形式）。 */

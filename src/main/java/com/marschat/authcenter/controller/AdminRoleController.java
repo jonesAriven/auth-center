@@ -91,8 +91,20 @@ public class AdminRoleController {
      * <p>{@code roleIds} 为空 = **「移出本系统」**（清空该用户在本应用的全部角色，统一身份保留）。
      * 该端点被三条路径共用：应用侧「移出本系统」/ 应用侧「添加已有用户」/ 中心「跨应用授权」矩阵改绑，
      * 故审计在 service 层统一留痕（action = {@code user.remove_from_app} 或 {@code user.client_roles}）。
+     *
+     * <p><b>Phase 12 第二阶段（三层权限 API）· 放宽鉴权 + 兼容过渡</b>：鉴权由类级
+     * {@code hasRole('ADMIN')} 放宽为「平台管理员 <b>或</b> 本应用管理员」（应用管理员 = 持有
+     * {@code client} 的 {@code api:admin:write} 权限点）。保留 {@code ?client=} 参数，
+     * 且鉴权（{@code #client}）与落库用的是**同一个变量**（同一方法调用，不串味）。
+     *
+     * @deprecated 应用侧应改用 <b>path 化</b>端点
+     *   {@code /admin/clients/{clientId}/members}、{@code /admin/clients/{clientId}/users/{userId}/roles}
+     *   —— clientId 钉进 path，从路由层杜绝「鉴权 client=A / 落库 client=B」。本端点仅为存量调用方
+     *   向后兼容保留，<b>不物理删除</b>（保留回滚路径）。
      */
+    @Deprecated
     @PutMapping("/users/{userId}/client-roles")
+    @PreAuthorize("hasRole('ADMIN') or @appAuthz.isAppAdmin(authentication,#client)")
     public Result<?> assignUserClientRoles(@PathVariable long userId, @RequestParam String client,
                                            @RequestBody AssignRolesRequest body) {
         if (body == null || body.getRoleIds() == null) {
@@ -114,8 +126,20 @@ public class AdminRoleController {
         return Result.ok(permissionService.userMenuOverrideCodes(userId, client));
     }
 
-    /** 用户菜单覆盖全量覆盖。body: {"codes": ["marschat-kbops:menu:ports", ...]}（从角色权限中扣除）。 */
+    /**
+     * 用户菜单覆盖全量覆盖。body: {"codes": ["marschat-kbops:menu:ports", ...]}（从角色权限中扣除）。
+     *
+     * <p><b>Phase 12 第二阶段 · 放宽鉴权 + 兼容过渡</b>：鉴权放宽为「平台管理员 <b>或</b> 本应用管理员」；
+     * 语义仍为<b>只减不加</b>（仅写 deny 集，不下发任何新权限点），故不构成提权面。保留 {@code ?client=}，
+     * 鉴权（{@code #client}）与落库同一变量。
+     *
+     * @deprecated 应用侧应改用 path 化端点
+     *   {@code /admin/clients/{clientId}/users/{userId}/menu-overrides}；本端点仅向后兼容保留，
+     *   <b>不物理删除</b>（保留回滚路径）。
+     */
+    @Deprecated
     @PutMapping("/users/{userId}/menu-overrides")
+    @PreAuthorize("hasRole('ADMIN') or @appAuthz.isAppAdmin(authentication,#client)")
     public Result<?> assignUserMenuOverrides(@PathVariable long userId, @RequestParam String client,
                                              @RequestBody AssignRequest body) {
         if (body == null || body.getCodes() == null) {
