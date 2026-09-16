@@ -1172,4 +1172,124 @@ public class PermissionService {
                         + "                  WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.client_id=?)",
                 args.toArray());
     }
+
+    // ═════════════════ D-7 受限读端点支撑 + R8 自锁保护（Phase 12） ═════════════════
+
+    /**
+     * R8 口径：目标用户当前是否持有本应用 {@code api:admin:write}（直查 DB）。
+     * 异常时按「是」处理＝保守阻止（fail-closed，管理面宁拒勿纵）。
+     */
+    public boolean isUserAppAdmin(long userId, String clientId) {
+        try {
+            Long n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(DISTINCT ur.user_id) FROM sys_user_role ur "
+                    + "JOIN sys_role_permission rp ON rp.role_id = ur.role_id "
+                    + "JOIN sys_permission p ON p.id = rp.permission_id "
+                    + "WHERE ur.user_id=? AND ur.client_id=? AND p.client_id=? "
+                    + "AND p.type='api' AND p.code='admin:write' AND p.status=1",
+                    Long.class, userId, clientId, clientId);
+            return n != null && n > 0;
+        } catch (Exception e) {
+            log.warn("R8 判定目标用户管理员身份失败（按是处理·保守）: user={} client={} err={}",
+                    userId, clientId, e.getMessage());
+            return true;
+        }
+    }
+
+    /**
+     * R8 口径：本应用当前持有 {@code api:admin:write} 的用户数。
+     * 与 {@link #isAppAdmin(long, String)} 同口径；异常 fail-closed 回 0（视为最后一名，触发自锁判定）。
+     */
+    public int countAppAdmins(String clientId) {
+        try {
+            Long n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(DISTINCT ur.user_id) FROM sys_user_role ur "
+                    + "JOIN sys_role_permission rp ON rp.role_id = ur.role_id "
+                    + "JOIN sys_permission p ON p.id = rp.permission_id "
+                    + "WHERE ur.client_id=? AND p.client_id=? "
+                    + "AND p.type='api' AND p.code='admin:write' AND p.status=1",
+                    Long.class, clientId, clientId);
+            return n == null ? 0 : n.intValue();
+        } catch (Exception e) {
+            log.warn("R8 统计应用管理员数失败（fail-closed 回 0）: client={} err={}", clientId, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * R8 口径：给定角色集合（本次全量覆盖的新绑定）是否仍能让目标用户保有
+     * {@code api:admin:write}。空集＝移出，必回 false；异常 fail-closed 回 false。
+     * roleIds 为请求体传入的数字 id（{@code assignUserClientRoles} 落库前会再校验归属），
+     * 此处仅做存在性判定。
+     */
+    public boolean roleIdsKeepAppAdmin(String clientId, Collection<Long> roleIds) {
+        if (roleIds == null || roleIds.isEmpty()) {
+            return false;
+        }
+        try {
+            String in = roleIds.stream().map(String::valueOf).collect(Collectors.joining(","));
+            Long n = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM sys_role_permission rp "
+                    + "JOIN sys_permission p ON p.id = rp.permission_id "
+                    + "WHERE p.client_id=? AND p.type='api' AND p.code='admin:write' AND p.status=1 "
+                    + "AND rp.role_id IN (" + in + ")",
+                    Long.class, clientId);
+            return n != null && n > 0;
+        } catch (Exception e) {
+            log.warn("R8 判定角色集是否保有管理员权限失败（fail-closed）: client={} err={}",
+                    clientId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * D-7 受限读：本应用「可加成员候选」——关键词命中的、**尚未加入**本应用的用户。
+     * 仅回 {@code userId/username/nickname} 三字段（禁 email/角色/状态）。
+     * keyword 已由控制器保证 ≥2 字符（此处再做 LIKE 转义）；size 已由控制器 clamp ≤20。
+     */
+    public List<Map<String, Object>> listMemberCandidates(String clientId, String keyword, int size) {
+        String kw = "%" + keyword.replace("\\", "\\\\")
+                .replace("%", "\\%").replace("_", "\\_") + "%";
+        try {
+            return jdbcTemplate.query(
+                    "SELECT id, username, nickname FROM user "
+                    + "WHERE status=1 AND (username LIKE ? OR nickname LIKE ?) "
+                    + "AND NOT EXISTS (SELECT 1 FROM sys_user_role ur WHERE ur.user_id=user.id AND ur.client_id=?) "
+                    + "ORDER BY id LIMIT ?",
+                    (rs, i) -> {
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("userId", rs.getLong(1));
+                        m.put("username", rs.getString(2));
+                        m.put("nickname", rs.getString(3));
+                        return m;
+                    }, kw, kw, clientId, size);
+        } catch (Exception e) {
+            log.warn("查成员候选失败: client={} err={}", clientId, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * D-7 受限读：本应用（scope='client'）的角色清单——仅 id/code/name/description/status，
+     * 不含权限点绑定明细。
+     */
+    public List<Map<String, Object>> listClientRoles(String clientId) {
+        try {
+            return jdbcTemplate.query(
+                    "SELECT id, code, name, description, status FROM sys_role "
+                    + "WHERE scope='client' AND client_id=? ORDER BY id",
+                    (rs, i) -> {
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("id", rs.getLong(1));
+                        m.put("code", rs.getString(2));
+                        m.put("name", rs.getString(3));
+                        m.put("description", rs.getString(4));
+                        m.put("status", rs.getInt(5));
+                        return m;
+                    }, clientId);
+        } catch (Exception e) {
+            log.warn("列应用角色失败: client={} err={}", clientId, e.getMessage());
+            return new ArrayList<>();
+        }
+    }
 }
