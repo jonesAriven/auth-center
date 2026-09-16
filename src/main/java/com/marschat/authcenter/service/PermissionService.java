@@ -1276,7 +1276,7 @@ public class PermissionService {
     public List<Map<String, Object>> listClientRoles(String clientId) {
         try {
             return jdbcTemplate.query(
-                    "SELECT id, code, name, description, status FROM sys_role "
+                    "SELECT id, code, name, description FROM sys_role "
                     + "WHERE scope='client' AND client_id=? ORDER BY id",
                     (rs, i) -> {
                         Map<String, Object> m = new HashMap<>();
@@ -1284,7 +1284,6 @@ public class PermissionService {
                         m.put("code", rs.getString(2));
                         m.put("name", rs.getString(3));
                         m.put("description", rs.getString(4));
-                        m.put("status", rs.getInt(5));
                         return m;
                     }, clientId);
         } catch (Exception e) {
