@@ -1253,7 +1253,7 @@ public class PermissionService {
         try {
             return jdbcTemplate.query(
                     "SELECT id, username, nickname FROM user "
-                    + "WHERE status=1 AND (username LIKE ? OR nickname LIKE ?) "
+                    + "WHERE status=1 AND deleted=0 AND (username LIKE ? OR nickname LIKE ?) "
                     + "AND NOT EXISTS (SELECT 1 FROM sys_user_role ur WHERE ur.user_id=user.id AND ur.client_id=?) "
                     + "ORDER BY id LIMIT ?",
                     (rs, i) -> {
