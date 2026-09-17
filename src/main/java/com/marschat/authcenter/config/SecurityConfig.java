@@ -235,6 +235,10 @@ public class SecurityConfig {
             .cors(cors -> cors.configurationSource(adminApiCorsConfigurationSource()))
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
+                // 2026-09-17：浏览器对每个页面自动请求 /favicon.ico，此前落 anyRequest().authenticated()
+                // → IdP 登录页每次都产生一条 403/404 的 console 报错（六应用 SSO 全程可见）。
+                // 放行 + static/ 下提供真实图标，消除噪声。
+                .requestMatchers("/favicon.ico").permitAll()
                 .requestMatchers("/auth/login", "/auth/refresh").permitAll()
                 .requestMatchers("/auth/forgot-password", "/auth/reset-password").permitAll()
                 .requestMatchers("/auth/error-log/report").permitAll()
