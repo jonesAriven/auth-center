@@ -32,11 +32,18 @@
     .error { display: none; background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; font-size: 13px;
              padding: 9px 12px; border-radius: 8px; margin-bottom: 16px; }
     .error.show { display: block; }
+    .back-link { display: inline-flex; align-items: center; gap: 4px; font-size: 13px;
+                 color: var(--brand); text-decoration: none; margin-bottom: 18px; }
+    .back-link:hover { text-decoration: underline; }
+    .back-link[hidden] { display: none; }
     .footer { text-align: center; font-size: 12px; color: var(--muted); margin-top: 22px; }
   </style>
 </head>
 <body>
   <div class="card">
+    <!-- 缺陷 A：仅当本次授权来自某应用时显示（由 /login-context 判定） -->
+    <a id="backLink" class="back-link" rel="nofollow" hidden>← 返回登录页</a>
+
     <div class="brand">
       <div class="logo">M</div>
       <h1>MarsChat 统一认证</h1>
@@ -69,6 +76,30 @@
     var q = new URLSearchParams(location.search);
     if (q.has('error')) document.getElementById('err').classList.add('show');
     if (q.has('logout')) document.getElementById('err').textContent = '您已安全退出';
+
+    // ===== 缺陷 A：向 IdP 询问「本次授权来自哪个应用」，据此渲染「返回 <应用> 登录页」 =====
+    (function () {
+      var KEY = 'marschat_login_ctx';
+      function render(d) {
+        var a = document.getElementById('backLink');
+        if (!a) return;
+        if (!d || !d.returnTo) { a.hidden = true; return; }
+        a.href = d.returnTo;
+        a.textContent = '← 返回「' + (d.appName || '应用') + '」登录页';
+        a.hidden = false;
+      }
+      // 先渲染上次结果（登录失败会 302 回 /login.html?error，避免按钮闪一下再出现）
+      try { render(JSON.parse(sessionStorage.getItem(KEY) || 'null')); } catch (e) { /* ignore */ }
+      // 同一会话内客户端缓存：SavedRequest 在本次会话中不变
+      fetch('/login-context', { credentials: 'same-origin', headers: { Accept: 'application/json' } })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (b) {
+          var d = b && b.code === 200 ? b.data : null;
+          try { sessionStorage.setItem(KEY, JSON.stringify(d)); } catch (e) { /* ignore */ }
+          render(d);
+        })
+        .catch(function () { /* 静默降级：无返回入口，绝不影响登录 */ });
+    })();
   </script>
 </body>
 </html>

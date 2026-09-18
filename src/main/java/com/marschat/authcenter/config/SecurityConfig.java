@@ -112,7 +112,8 @@ public class SecurityConfig {
     public SecurityFilterChain loginPageSecurityFilterChain(HttpSecurity http) throws Exception {
         http
             .securityMatcher("/login", "/login.html", "/forgot-password.html", "/error",
-                    "/auth/session", "/auth/slo")
+                    "/auth/session", "/auth/slo",
+                    "/login-context")   // ← 新增（缺陷 A）：IdP 登录页上下文，须挂有会话的链上
             .cors(cors -> cors.configurationSource(ssoAuxCorsConfigurationSource()))
             .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
             .formLogin(form -> form
